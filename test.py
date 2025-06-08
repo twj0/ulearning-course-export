@@ -36,8 +36,7 @@ IMAGE_DOWNLOAD_HEADERS = { # Simplified for image download
 }
 
 # --- Helper Functions (sanitize_filename, get_clean_text_from_html, escape_latex_special_chars, download_image, get_question_type_name) ---
-# Эти функции могут быть скопированы из предыдущего скрипта с небольшими изменениями при необходимости.
-# For brevity, I'll assume they are defined as before.
+
 
 def sanitize_filename(filename):
     if filename is None: filename = "untitled"
@@ -57,6 +56,19 @@ def get_clean_text_from_html(html_content):
     text = re.sub(r'\n\s*\n', '\n\n', text)
     text = re.sub(r'^\s*\n|\n\s*$', '', text)
     return text.strip()
+
+def extract_image_urls_from_html(html_content):
+    """Extracts all unique image URLs from an HTML string."""
+    if not html_content or not isinstance(html_content, str):
+        return []
+    soup = BeautifulSoup(html_content, 'html.parser')
+    img_tags = soup.find_all('img')
+    urls = []
+    for img in img_tags:
+        if 'src' in img.attrs and img['src'] and img['src'].strip(): # Ensure src exists and is not empty
+            urls.append(img['src'].strip())
+    return list(set(urls)) # Return unique URLs
+
 
 def escape_latex_special_chars(text):
     if not text: return ""
@@ -122,12 +134,14 @@ def get_question_answer(question_id, parent_id, headers):
         return None
 
 # --- Main Processing Logic ---
+# ... (所有之前的代码，包括配置、辅助函数、API调用函数都保持不变) ...
+# Make sure extract_image_urls_from_html is defined correctly as provided before.
+
 def process_courseware_questions():
     global API_HEADERS
-    API_HEADERS["authorization"] = AUTHORIZATION_TOKEN # Ensure token is set
+    API_HEADERS["authorization"] = AUTHORIZATION_TOKEN
     API_HEADERS["ua-authorization"] = AUTHORIZATION_TOKEN
 
-    # 1. Get Course Directory
     directory_data = get_course_directory(COURSE_ID, CLASS_ID, API_HEADERS)
     if not directory_data:
         print("Failed to fetch course directory. Exiting.")
@@ -139,25 +153,17 @@ def process_courseware_questions():
     os.makedirs(course_output_dir, exist_ok=True)
     print(f"Processing course: {course_name_raw}")
 
-    # Prepare for aggregated Markdown and TeX files for the whole course
     all_course_questions_md_content = [f"# {course_name_raw} - 课件题目汇总\n\n"]
     all_course_questions_tex_content = [
-        r"\documentclass[12pt,UTF8]{ctexart}", # Using ctexart for better Chinese defaults
-        r"\usepackage{graphicx}",
-        r"\usepackage{amsmath, amsfonts, amssymb}",
-        r"\usepackage[a4paper, margin=1in]{geometry}",
-        r"\usepackage{enumitem}",
-        r"\usepackage{hyperref}",
-        r"\hypersetup{colorlinks=true, linkcolor=blue, urlcolor=blue, citecolor=green}",
+        r"\documentclass[12pt,UTF8]{ctexart}",
+        r"\usepackage{graphicx}", r"\usepackage{amsmath, amsfonts, amssymb}",
+        r"\usepackage[a4paper, margin=1in]{geometry}", r"\usepackage{enumitem}",
+        r"\usepackage{hyperref}", r"\hypersetup{colorlinks=true, linkcolor=blue, urlcolor=blue, citecolor=green}",
         r"\usepackage{array,longtable}",
         f"\\title{{{escape_latex_special_chars(course_name_raw)} - 课件题目汇总}}",
-        f"\\author{{优学院导出}}",
-        f"\\date{{{datetime.date.today().strftime('%Y-%m-%d')}}}",
-        r"\begin{document}",
-        r"\maketitle",
-        "\n"
+        f"\\author{{优学院导出}}", f"\\date{{{datetime.date.today().strftime('%Y-%m-%d')}}}",
+        r"\begin{document}", r"\maketitle", "\n"
     ]
-
 
     chapters = directory_data.get("chapters", [])
     if not chapters:
@@ -167,22 +173,17 @@ def process_courseware_questions():
     for chapter_idx, chapter in enumerate(chapters):
         chapter_title_raw = chapter.get("nodetitle", f"UnknownChapter_{chapter_idx+1}")
         chapter_node_id = chapter.get("nodeid")
-        chapter_id = chapter.get("id") # This is the chapterId for learnCourse.html links
-
+        
         if not chapter_node_id:
             print(f"Skipping chapter '{chapter_title_raw}' due to missing nodeId.")
             continue
         
         chapter_title_sanitized = sanitize_filename(chapter_title_raw)
-        # chapter_output_dir = os.path.join(course_output_dir, f"chapter_{chapter_node_id}_{chapter_title_sanitized}")
-        # os.makedirs(chapter_output_dir, exist_ok=True)
         print(f"\nProcessing Chapter: {chapter_title_raw} (NodeID: {chapter_node_id})")
 
         all_course_questions_md_content.append(f"## {chapter_title_raw}\n\n")
         all_course_questions_tex_content.append(f"\\section*{{{escape_latex_special_chars(chapter_title_raw)}}}\n\\hrulefill\n")
 
-
-        # 2. Get Whole Chapter Page Content
         chapter_content = get_whole_chapter_page_content(chapter_node_id, API_HEADERS)
         if not chapter_content:
             print(f"  Failed to fetch content for chapter '{chapter_title_raw}'. Skipping.")
@@ -193,23 +194,18 @@ def process_courseware_questions():
 
         for item_dto in wholepage_item_list:
             for wholepage_dto in item_dto.get("wholepageDTOList", []):
-                if wholepage_dto.get("contentType") == 7: # This is a question set "练习题"
+                if wholepage_dto.get("contentType") == 7: # Question set
                     parent_id = wholepage_dto.get("id")
                     unit_title_raw = wholepage_dto.get("content", f"UnknownUnit_{parent_id}")
                     unit_title_sanitized = sanitize_filename(unit_title_raw)
                     
-                    # unit_output_dir = os.path.join(chapter_output_dir, f"unit_{parent_id}_{unit_title_sanitized}")
-                    # os.makedirs(unit_output_dir, exist_ok=True)
                     print(f"  Processing Unit: {unit_title_raw} (ParentID: {parent_id})")
 
                     all_course_questions_md_content.append(f"### {unit_title_raw}\n\n")
                     all_course_questions_tex_content.append(f"\\subsection*{{{escape_latex_special_chars(unit_title_raw)}}}\n")
 
-
-                    # Assuming coursepageDTOList usually has one entry for type 7
                     coursepage_list = wholepage_dto.get("coursepageDTOList", [])
                     if not coursepage_list: continue
-
                     questions_list = coursepage_list[0].get("questionDTOList", [])
                     if not questions_list:
                         print(f"    No questions found in unit '{unit_title_raw}'.")
@@ -223,103 +219,145 @@ def process_courseware_questions():
                         q_type_name = get_question_type_name(q_type_code)
                         q_options_raw = q_data.get("choiceitemModels", [])
 
-                        # Prepare directory for this question's images (within the main course folder)
-                        question_img_folder_relative = os.path.join(f"chapter_{chapter_node_id}_{chapter_title_sanitized}", 
-                                                                    f"unit_{parent_id}_{unit_title_sanitized}", 
-                                                                    f"question_{question_id}")
-                        question_img_folder_absolute = os.path.join(course_output_dir, question_img_folder_relative)
-                        os.makedirs(question_img_folder_absolute, exist_ok=True)
+                        question_img_subfolder_relative = os.path.join(
+                            f"chapter_{chapter_node_id}_{chapter_title_sanitized}", 
+                            f"unit_{parent_id}_{unit_title_sanitized}", 
+                            f"question_{question_id}"
+                        )
+                        question_folder_absolute = os.path.join(course_output_dir, question_img_subfolder_relative) # Renamed for clarity
+                        os.makedirs(question_folder_absolute, exist_ok=True)
+                        
+                        # print(f"    Processing Q: {question_id} (Type: {q_type_name}) - Data in '{question_img_subfolder_relative}'")
 
-
-                        print(f"    Fetching Q: {question_id} (Type: {q_type_name})")
-
-                        # Get answer
                         answer_data = get_question_answer(question_id, parent_id, API_HEADERS)
                         correct_answer_str_list = []
                         if answer_data and answer_data.get("correctAnswerList"):
                             correct_answer_str_list = [get_clean_text_from_html(str(ans)) for ans in answer_data["correctAnswerList"]]
-                        elif answer_data and answer_data.get("answer"): # Fallback for some answer structures
+                        elif answer_data and answer_data.get("answer"):
                             correct_answer_str_list = [get_clean_text_from_html(str(answer_data["answer"]))]
-
-                        # --- Consolidate for Markdown ---
-                        md_q_entry = [f"#### {question_counter_in_chapter}. ({q_type_name}) QID: {question_id}\n"]
                         
-                        # Title text and images
                         title_text_clean = get_clean_text_from_html(q_title_html)
-                        md_q_entry.append(f"**题干:**\n{title_text_clean}\n")
-                        # Download and link title images
-                        # ... (image download logic needs to be implemented here for MD) ...
+                        
+                        # --- Save individual question_info.txt ---
+                        info_txt_path = os.path.join(question_folder_absolute, "question_info.txt")
+                        with open(info_txt_path, 'w', encoding='utf-8') as f_info:
+                            f_info.write(f"课程名称: {course_name_raw}\n")
+                            f_info.write(f"章节名称: {chapter_title_raw}\n")
+                            f_info.write(f"单元名称: {unit_title_raw}\n")
+                            f_info.write(f"题目ID: {question_id}\n")
+                            f_info.write(f"ParentID (单元ID): {parent_id}\n")
+                            f_info.write(f"题型: {q_type_name}\n\n")
+                            f_info.write(f"【题干】:\n{title_text_clean}\n\n")
+                            if q_options_raw:
+                                f_info.write("【选项】:\n")
+                                for opt_idx_info, opt_info in enumerate(q_options_raw):
+                                    opt_title_html_info = opt_info.get("title", "")
+                                    opt_text_clean_info = get_clean_text_from_html(opt_title_html_info)
+                                    opt_soup_info = BeautifulSoup(opt_title_html_info, 'html.parser')
+                                    p_tag_info = opt_soup_info.find('p')
+                                    prefix_info = chr(ord('A') + opt_idx_info) + ". "
+                                    if p_tag_info and len(p_tag_info.get_text(strip=True)) == 1 and p_tag_info.get_text(strip=True).isalpha():
+                                        prefix_text_info = p_tag_info.get_text(strip=True)
+                                        prefix_info = prefix_text_info + ". "
+                                        if opt_text_clean_info.startswith(prefix_text_info):
+                                            opt_text_clean_info = opt_text_clean_info[len(prefix_text_info):].lstrip(". ")
+                                    f_info.write(f"{prefix_info}{opt_text_clean_info}\n")
+                                f_info.write("\n")
+                            f_info.write(f"【正确答案】:\n{' | '.join(correct_answer_str_list) or '未获取到'}\n")
+                        # print(f"      Info text saved to: {info_txt_path}")
 
-                        # Options text and images
+
+                        # --- Markdown Content Generation ---
+                        md_q_entry = [f"#### {question_counter_in_chapter}. ({q_type_name}) QID: {question_id} (ParentID: {parent_id})\n"]
+                        md_q_entry.append(f"**题干:**\n{title_text_clean}\n")
+                        
+                        for img_idx, img_url in enumerate(extract_image_urls_from_html(q_title_html)):
+                            img_filename = f"title_img_{img_idx+1}{os.path.splitext(urlparse(img_url).path)[1] or '.png'}"
+                            img_save_path = os.path.join(question_folder_absolute, img_filename)
+                            if download_image(img_url, img_save_path, IMAGE_DOWNLOAD_HEADERS):
+                                img_relative_path_for_md = os.path.join(question_img_subfolder_relative, img_filename).replace("\\", "/")
+                                md_q_entry.append(f"![题干图片 {img_idx+1}]({img_relative_path_for_md})\n")
+                        md_q_entry.append("\n")
+
                         if q_options_raw:
                             md_q_entry.append("**选项:**\n")
                             for opt_idx, opt in enumerate(q_options_raw):
                                 opt_title_html = opt.get("title", "")
                                 opt_text_clean = get_clean_text_from_html(opt_title_html)
-                                # Try to find an option letter if embedded (e.g. <p>A</p> Actual option)
                                 opt_soup = BeautifulSoup(opt_title_html, 'html.parser')
                                 p_tag = opt_soup.find('p')
                                 prefix = chr(ord('A') + opt_idx) + ". "
+                                option_letter_for_img = chr(ord('A') + opt_idx)
                                 if p_tag and len(p_tag.get_text(strip=True)) == 1 and p_tag.get_text(strip=True).isalpha():
-                                     prefix = p_tag.get_text(strip=True) + ". "
-                                     if opt_text_clean.startswith(p_tag.get_text(strip=True)): # Avoid double prefix
-                                         opt_text_clean = opt_text_clean[len(p_tag.get_text(strip=True)):].lstrip(". ")
-
-
+                                    prefix_text = p_tag.get_text(strip=True)
+                                    prefix = prefix_text + ". "
+                                    option_letter_for_img = prefix_text
+                                    if opt_text_clean.startswith(prefix_text):
+                                        opt_text_clean = opt_text_clean[len(prefix_text):].lstrip(". ")
                                 md_q_entry.append(f"- {prefix}{opt_text_clean}\n")
-                                # Download and link option images
-                                # ... (image download logic for options in MD) ...
+                                for img_idx, img_url in enumerate(extract_image_urls_from_html(opt_title_html)):
+                                    img_filename = f"option_{option_letter_for_img}_img_{img_idx+1}{os.path.splitext(urlparse(img_url).path)[1] or '.png'}"
+                                    img_save_path = os.path.join(question_folder_absolute, img_filename)
+                                    if download_image(img_url, img_save_path, IMAGE_DOWNLOAD_HEADERS):
+                                        img_relative_path_for_md = os.path.join(question_img_subfolder_relative, img_filename).replace("\\", "/")
+                                        md_q_entry.append(f"  ![选项 {option_letter_for_img} 图片 {img_idx+1}]({img_relative_path_for_md})\n")
+                            md_q_entry.append("\n")
                         
                         md_q_entry.append(f"**正确答案:**\n{' | '.join(correct_answer_str_list) or '未获取到'}\n")
                         md_q_entry.append("---\n")
                         all_course_questions_md_content.extend(md_q_entry)
 
-                        # --- Consolidate for TeX ---
-                        tex_q_entry = [f"\\subsubsection*{{{question_counter_in_chapter}. ({escape_latex_special_chars(q_type_name)}) \\small QID: {question_id}}}\n"]
-                        title_text_tex = escape_latex_special_chars(get_clean_text_from_html(q_title_html)).replace('\n\n', '\n\\par\n')
+                        # --- TeX Content Generation ---
+                        tex_q_entry = [f"\\subsubsection*{{{question_counter_in_chapter}. ({escape_latex_special_chars(q_type_name)}) \\small QID: {question_id} (ParentID: {parent_id})}}\n"]
+                        title_text_tex = escape_latex_special_chars(title_text_clean).replace('\n\n', '\n\\par\n') # Already cleaned title_text_clean
                         tex_q_entry.append(f"\\textbf{{{escape_latex_special_chars('题干')}:}}\n{title_text_tex}\n")
-                        # ... (image linking for TeX title) ...
-
+                        for img_idx, img_url in enumerate(extract_image_urls_from_html(q_title_html)):
+                            img_filename = f"title_img_{img_idx+1}{os.path.splitext(urlparse(img_url).path)[1] or '.png'}"
+                            img_relative_path_for_tex = os.path.join(question_img_subfolder_relative, img_filename).replace("\\", "/")
+                            if os.path.exists(os.path.join(question_folder_absolute, img_filename)):
+                                tex_q_entry.append(f"\\begin{{center}}\\includegraphics[width=0.8\\textwidth,keepaspectratio]{{{img_relative_path_for_tex}}}\\end{{center}}\n")
+                        tex_q_entry.append("\n")
+                        
                         if q_options_raw:
                             tex_q_entry.append(f"\\textbf{{{escape_latex_special_chars('选项')}:}}\n\\begin{{itemize}}[leftmargin=*]\n")
                             for opt_idx, opt in enumerate(q_options_raw):
                                 opt_title_html = opt.get("title", "")
-                                opt_text_clean_raw = get_clean_text_from_html(opt_title_html)
-                                opt_soup = BeautifulSoup(opt_title_html, 'html.parser')
+                                opt_text_clean_raw = get_clean_text_from_html(opt_title_html) # Use already cleaned text
+                                opt_soup = BeautifulSoup(opt_title_html, 'html.parser') # Still need soup for prefix
                                 p_tag = opt_soup.find('p')
                                 prefix_raw = chr(ord('A') + opt_idx) + ". "
+                                option_letter_for_img = chr(ord('A') + opt_idx)
                                 if p_tag and len(p_tag.get_text(strip=True)) == 1 and p_tag.get_text(strip=True).isalpha():
-                                     prefix_raw = p_tag.get_text(strip=True) + ". "
-                                     if opt_text_clean_raw.startswith(p_tag.get_text(strip=True)):
-                                         opt_text_clean_raw = opt_text_clean_raw[len(p_tag.get_text(strip=True)):].lstrip(". ")
-
+                                    prefix_text = p_tag.get_text(strip=True)
+                                    prefix_raw = prefix_text + ". "
+                                    option_letter_for_img = prefix_text
+                                    if opt_text_clean_raw.startswith(prefix_text):
+                                        opt_text_clean_raw = opt_text_clean_raw[len(prefix_text):].lstrip(". ")
                                 opt_text_tex = escape_latex_special_chars(prefix_raw + opt_text_clean_raw).replace('\n\n', '\n\\par\n')
                                 tex_q_entry.append(f"  \\item {opt_text_tex}\n")
-                                # ... (image linking for TeX option) ...
+                                for img_idx, img_url in enumerate(extract_image_urls_from_html(opt_title_html)):
+                                    img_filename = f"option_{option_letter_for_img}_img_{img_idx+1}{os.path.splitext(urlparse(img_url).path)[1] or '.png'}"
+                                    img_relative_path_for_tex = os.path.join(question_img_subfolder_relative, img_filename).replace("\\", "/")
+                                    if os.path.exists(os.path.join(question_folder_absolute, img_filename)):
+                                        tex_q_entry.append(f"  \\begin{{center}}\\includegraphics[width=0.7\\textwidth,keepaspectratio]{{{img_relative_path_for_tex}}}\\end{{center}}\n")
                             tex_q_entry.append("\\end{itemize}\n")
                         
                         tex_q_entry.append(f"\\textbf{{{escape_latex_special_chars('正确答案')}:}}\n{escape_latex_special_chars(' | '.join(correct_answer_str_list) or '未获取到')}\n")
                         tex_q_entry.append("\\vspace{0.3em}\\hrulefill\\vspace{0.7em}\n")
                         all_course_questions_tex_content.extend(tex_q_entry)
 
-        if question_counter_in_chapter == 0: # If no questions were found in this chapter's units
+        if question_counter_in_chapter == 0:
              all_course_questions_md_content.append(f"本章节未找到练习题。\n\n")
              all_course_questions_tex_content.append(f"本章节未找到练习题。\n\n")
 
-
-    # Write aggregated Markdown file
     md_file_path = os.path.join(course_output_dir, f"{course_name_sanitized}_课件题目.md")
-    with open(md_file_path, 'w', encoding='utf-8') as f:
-        f.write("".join(all_course_questions_md_content))
+    with open(md_file_path, 'w', encoding='utf-8') as f: f.write("".join(all_course_questions_md_content))
     print(f"\nAggregated Markdown file saved to: {md_file_path}")
 
-    # Write aggregated TeX file
     all_course_questions_tex_content.append(r"\end{document}")
     tex_file_path = os.path.join(course_output_dir, f"{course_name_sanitized}_课件题目.tex")
-    with open(tex_file_path, 'w', encoding='utf-8') as f:
-        f.write("\n".join(all_course_questions_tex_content))
+    with open(tex_file_path, 'w', encoding='utf-8') as f: f.write("\n".join(all_course_questions_tex_content))
     print(f"Aggregated TeX file saved to: {tex_file_path}")
-
 
 if __name__ == "__main__":
     if not all([COURSE_ID, CLASS_ID, AUTHORIZATION_TOKEN]):
