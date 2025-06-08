@@ -62,28 +62,17 @@
 3.  **运行脚本**:
     打开您的终端或命令提示符，导航到脚本所在的目录，然后执行：
     ```bash
-    python your_script_name.py 
+    ulearning_course_export
     ```
-    (请将 `your_script_name.py` 替换为您实际的脚本文件名)
+
 
 4.  **用户交互提示**:
     *   脚本运行时，会首先列出检测到的所有课程专题（章节）。
     *   您将被要求输入希望导出的专题序号（例如 `1,3,5`，或输入 `all` 导出全部）。
     *   接着，您将被询问是否为每个问题保存详细的 `question_info.txt` 文件（默认为否）。
 
-ulearning_courseware_exports/
-└── course_{COURSE_ID}{课程名称}/
-    ├── <课程名称>课件题目.md 
-    ├── <课程名称>课件题目.tex 
-    └── chapter{章节NodeID}{章节标题}/ 
-        └── unit{单元ParentID}{单元标题}/ 
-            └── question{题目ID}/ 
-                ├── question_info.txt 
-                ├── title_img_1.png 
-                ├── option_A_img_1.jpg 
-                └── ... (更多图片和选项图片)
-图片在 Markdown 和 TeX 文件中会使用相对路径引用。
-
+5.  **等待导出完成**:
+...
 ## 注意事项
 
 *   **Token 有效期**: `AUTHORIZATION_TOKEN` 通常具有时效性。如果脚本运行失败并提示认证错误（如HTTP 401），您可能需要重新从浏览器获取一个新的Token并更新到脚本中。
