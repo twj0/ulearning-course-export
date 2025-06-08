@@ -62,7 +62,7 @@
 3.  **运行脚本**:
     打开您的终端或命令提示符，导航到脚本所在的目录，然后执行：
     ```bash
-    ulearning_course_export
+    ulearning_course_export.py
     ```
 
 
