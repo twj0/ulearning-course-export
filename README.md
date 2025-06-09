@@ -64,7 +64,15 @@
     ```bash
     ulearning_course_export.py
     ```
+    或者
+    ```bash
+    python ulearning_course_export.py
+    ```
+    等待脚本运行完成，即可在 `ulearning_courseware_exports` 目录下找到导出的文件。
 
+    如果您希望将生成的 `.tex` 文件编译为 PDF 文档，您可以使用 LaTeX 发行版提供的工具（如 `pdflatex`）来编译生成的 `.tex` 文件。
+
+    使用下面的那个脚本会生成一个文本文件，里面是佛脚考试的AI导入题目格式。
 
 4.  **用户交互提示**:
     *   脚本运行时，会首先列出检测到的所有课程专题（章节）。
