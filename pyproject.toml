@@ -1,0 +1,12 @@
+[project]
+name = "ulearning-course-export"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "requests",
+"beautifulsoup4",
+"python-dotenv",
+"json5"
+]

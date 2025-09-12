@@ -5,18 +5,20 @@ import re
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse, unquote
 import datetime
+from dotenv import load_dotenv
 
 # --- Configuration ---
-COURSE_ID = "46099"  # 替换为你的 Course ID
-CLASS_ID = "851527"   # 替换为你的 Class ID
-AUTHORIZATION_TOKEN = "C79771B17441080DC52C42AF5C67289F" # 替换为你的 Token
+load_dotenv()
+
+COURSE_ID = os.getenv("COURSE_ID")
+CLASS_ID = os.getenv("CLASS_ID")
+AUTHORIZATION_TOKEN = os.getenv("AUTHORIZATION_TOKEN")
+BASE_API_URL = os.getenv("BASE_API_URL", "https://api.ulearning.cn")
+BASE_OUTPUT_DIR = os.getenv("BASE_OUTPUT_DIR", "ulearning_courseware_exports")
 
 # User choices - will be set by prompts
 SAVE_INDIVIDUAL_QUESTION_FILES = False # Default to False
 SELECTED_CHAPTERS_TO_PROCESS = [] # Default to empty, meaning process all or prompt
-
-BASE_API_URL = "https://api.ulearning.cn"
-BASE_OUTPUT_DIR = "ulearning_courseware_exports" 
 
 API_HEADERS = {
     "accept": "application/json, text/javascript, */*; q=0.01",
@@ -241,14 +243,18 @@ def process_courseware_questions():
                     all_course_questions_tex_content.append(f"\\subsection*{{{escape_latex_special_chars(unit_title_raw)}}}\n")
 
                     coursepage_list = wholepage_dto.get("coursepageDTOList", [])
-                    if not coursepage_list: continue
-                    questions_list = coursepage_list[0].get("questionDTOList", [])
-                    if not questions_list:
-                        print(f"    No questions found in unit '{unit_title_raw}'.")
+                    if not coursepage_list:
                         continue
-                    
-                    for q_data in questions_list:
-                        question_counter_overall += 1
+
+                    questions_found_in_unit = False
+                    for coursepage in coursepage_list:
+                        questions_list = coursepage.get("questionDTOList", [])
+                        if not questions_list:
+                            continue  # No questions in this page, check next one
+
+                        questions_found_in_unit = True
+                        for q_data in questions_list:
+                            question_counter_overall += 1
                         question_id = q_data.get("questionid")
                         q_title_html = q_data.get("title", "N/A")
                         q_type_code = q_data.get("type")
@@ -389,6 +395,11 @@ def process_courseware_questions():
                         tex_q_entry.append(f"\\textbf{{{escape_latex_special_chars('正确答案')}:}}\n{escape_latex_special_chars(' | '.join(correct_answer_str_list) or '未获取到')}\n")
                         tex_q_entry.append("\\vspace{0.3em}\\hrulefill\\vspace{0.7em}\n")
                         all_course_questions_tex_content.extend(tex_q_entry)
+
+                    if not questions_found_in_unit:
+                        print(f"    No questions found in unit '{unit_title_raw}'.")
+                        print(f"    DEBUG: wholepage_dto for this unit:\n{json.dumps(wholepage_dto, indent=2, ensure_ascii=False)}\n")
+
         if question_counter_overall == 0 and chapter == SELECTED_CHAPTERS_TO_PROCESS[-1]: # Check if any question was processed in the selected chapters
              all_course_questions_md_content.append(f"在选定专题中未找到练习题。\n\n") # Message if no questions in ANY selected chapter
              all_course_questions_tex_content.append(f"在选定专题中未找到练习题。\n\n")
@@ -406,6 +417,6 @@ def process_courseware_questions():
 
 if __name__ == "__main__":
     if not all([COURSE_ID, CLASS_ID, AUTHORIZATION_TOKEN]):
-        print("请在脚本顶部配置 COURSE_ID, CLASS_ID, 和 AUTHORIZATION_TOKEN。")
+        print("错误：请确保 .env 文件中已配置 COURSE_ID, CLASS_ID, 和 AUTHORIZATION_TOKEN。")
     else:
         process_courseware_questions()
