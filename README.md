@@ -37,13 +37,13 @@
     ```
 
     如果使用uv进行包管理还可以：
-   ```bash
-   uv venv -p 3.12
-   ```
+      ```bash
+      uv venv -p 3.12
+      ```
 
-   ```bash
-   uv pip install -r requirements.txt
-   ```
+      ```bash
+      uv pip install -r requirements.txt
+      ```
 
 
 *   **可选**: 如果您希望将生成的 `.tex` 文件编译为 PDF 文档，您需要在您的计算机上安装一套 LaTeX 发行版（例如 MiKTeX for Windows, TeX Live for Linux/cross-platform, MacTeX for macOS）。
@@ -82,9 +82,9 @@
     ```
 
     如果是uv就使用
-   ```bash
-   uv run ulearning_course_export.py
-   ```
+      ```bash
+      uv run ulearning_course_export.py
+      ```
     等待脚本运行完成，即可在 `ulearning_courseware_exports` 目录下找到导出的文件。
 
     如果您希望将生成的 `.tex` 文件编译为 PDF 文档，您可以使用 LaTeX 发行版提供的工具（如 `pdflatex`）来编译生成的 `.tex` 文件。
