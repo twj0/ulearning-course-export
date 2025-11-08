@@ -1,0 +1,1206 @@
+// ==UserScript==
+// @name         Ulearning Courseware Markdown Exporter
+// @namespace    https://github.com/twj0/ulearning-course-export
+// @version      0.2.0
+// @description  Export Ulearning courseware questions as Markdown directly from the browser. Supports manual API export and automatic pagination export with debug mode for Tampermonkey / ScriptCat users.
+// @author       Cascade
+// @match        https://ua.ulearning.cn/learnCourse/learnCourse.html?*
+// @match        https://ua.ulearning.cn/learnCourseNew/learnCourse.html?*
+// @match        https://ua.ulearning.cn/learnCourse/learnCourseNew.html?*
+// @match        https://ua.dgut.edu.cn/learnCourse/learnCourse.html?*
+// @match        https://ua.dgut.edu.cn/learnCourseNew/learnCourse.html?*
+// @match        https://ua.dgut.edu.cn/learnCourse/learnCourseNew.html?*
+// @match        https://lms.dgut.edu.cn/*
+// @grant        GM_addStyle
+// @grant        GM_download
+// @grant        GM_notification
+// @connect      ua.ulearning.cn
+// @connect      ua.dgut.edu.cn
+// @connect      lms.dgut.edu.cn
+// @connect      nx-s3.ntalker.com
+// @connect      nx-s3-trail.ntalker.com
+// ==/UserScript==
+
+(function () {
+  "use strict";
+
+  const HOSTNAME = window.location.hostname;
+  const API_BASE = window.location.origin;
+  const ENV = detectEnvironment(HOSTNAME);
+
+  const ENDPOINTS = {
+    course_directory: [
+      { path: "/api/v2/learnCourse/courseDirectory", method: "POST" },
+      { path: "/learnCourse/courseDirectory", method: "POST" }
+    ],
+    chapter_content: [
+      { path: "/api/v2/learnCourse/getWholeChapterPageContent", method: "POST" },
+      { path: "/learnCourse/getWholeChapterPageContent", method: "POST" }
+    ],
+    question_answer: [
+      { path: "/api/v2/learnQuestion/getQuestionAnswer", method: "POST" },
+      { path: "/learnQuestion/getQuestionAnswer", method: "POST" }
+    ]
+  };
+
+  const ENV_ENDPOINTS = {
+    dgut: {
+      course_directory: [
+        {
+          path: ({ courseId, classId }) =>
+            `/uaapi/course/stu/${encodeURIComponent(courseId)}/directory?classId=${encodeURIComponent(classId)}`,
+          method: "GET"
+        }
+      ],
+      chapter_content: [
+        {
+          path: ({ nodeId }) => `/uaapi/wholepage/chapter/stu/${encodeURIComponent(nodeId)}`,
+          method: "GET"
+        }
+      ],
+      question_answer: [
+        {
+          path: ({ questionId, parentId }) =>
+            `/uaapi/questionAnswer/${encodeURIComponent(questionId)}?parentId=${encodeURIComponent(parentId)}`,
+          method: "GET"
+        }
+      ]
+    }
+  };
+
+  const QUESTION_TYPE_NAME = {
+    1: "单选题",
+    2: "多选题",
+    3: "不定项选择题",
+    4: "判断题",
+    5: "填空题",
+    6: "简答题/论述题",
+    7: "文件题",
+    11: "阅读理解",
+    12: "排序题",
+    17: "选词填空",
+    24: "综合题"
+  };
+
+  const TYPE_NAME_TO_CODE = Object.fromEntries(
+    Object.entries(QUESTION_TYPE_NAME).map(([code, name]) => [name, Number(code)])
+  );
+
+  const DEBUG_STORAGE_KEY = "ulearning_md_export_debug";
+  const DEBUG_TOGGLE_ID = "ulearning-md-export-debug";
+  const AUTO_EXPORT_BTN_ID = "ulearning-auto-export-btn";
+  const BUTTON_ID = "ulearning-md-export-btn";
+  const STYLE_ID = "ulearning-md-export-style";
+
+  let debugEnabled = (() => {
+    try {
+      return localStorage.getItem(DEBUG_STORAGE_KEY) === "true";
+    } catch (err) {
+      console.warn("[Ulearning Markdown Exporter] Failed to read debug flag", err);
+      return false;
+    }
+  })();
+
+  const autoExportState = {
+    running: false,
+    pageResults: [],
+    visitedPageIds: new Set(),
+    totalQuestions: 0
+  };
+
+  init();
+
+  function init() {
+    addStyle();
+    createExportButton();
+    createDebugToggle();
+  }
+
+  function addStyle() {
+    const css = `
+      #${BUTTON_ID}, #${DEBUG_TOGGLE_ID} {
+        position: fixed;
+        right: 24px;
+        z-index: 999999;
+        background: #4285f4;
+        color: #fff;
+        border: none;
+        border-radius: 6px;
+        padding: 10px 16px;
+        font-size: 14px;
+        cursor: pointer;
+        box-shadow: 0 4px 12px rgba(66, 133, 244, 0.35);
+        min-width: 180px;
+      }
+      #${BUTTON_ID} {
+        top: 90px;
+      }
+      #${DEBUG_TOGGLE_ID} {
+        top: 150px;
+        background: #fbbc04;
+        color: #000;
+      }
+      #${BUTTON_ID}:hover {
+        background: #2f6fdb;
+      }
+      #${DEBUG_TOGGLE_ID}:hover {
+        background: #f9ab00;
+      }
+      #${BUTTON_ID}.running {
+        background: #34a853;
+        cursor: wait;
+      }
+      #${BUTTON_ID}.running:hover {
+        background: #34a853;
+      }
+    `;
+
+    if (typeof GM_addStyle === "function") {
+      GM_addStyle(css);
+      return;
+    }
+
+    let styleEl = document.getElementById(STYLE_ID);
+    if (!styleEl) {
+      styleEl = document.createElement("style");
+      styleEl.id = STYLE_ID;
+      styleEl.textContent = css;
+      document.head.appendChild(styleEl);
+    }
+  }
+
+  function createExportButton() {
+    if (document.getElementById(BUTTON_ID)) {
+      return;
+    }
+    const btn = document.createElement("button");
+    btn.id = BUTTON_ID;
+    btn.textContent = "导出课件题目";
+    btn.addEventListener("click", () => {
+      if (autoExportState.running) {
+        stopAutoExport();
+        btn.classList.remove("running");
+        btn.textContent = "导出课件题目";
+        return;
+      }
+      btn.classList.add("running");
+      btn.textContent = "准备中...";
+      toggleAutoExport().catch((err) => {
+        notify("导出失败: " + (err && err.message ? err.message : err));
+        logDebug("Export failed", err);
+      }).finally(() => {
+        btn.classList.remove("running");
+        btn.textContent = "导出课件题目";
+      });
+    });
+    document.body.appendChild(btn);
+  }
+
+  function createDebugToggle() {
+    if (document.getElementById(DEBUG_TOGGLE_ID)) {
+      updateDebugToggle();
+      return;
+    }
+    const btn = document.createElement("button");
+    btn.id = DEBUG_TOGGLE_ID;
+    updateDebugToggle(btn);
+    btn.addEventListener("click", () => {
+      debugEnabled = !debugEnabled;
+      try {
+        localStorage.setItem(DEBUG_STORAGE_KEY, String(debugEnabled));
+      } catch (err) {
+        console.warn("[Ulearning Markdown Exporter] Failed to persist debug flag", err);
+      }
+      updateDebugToggle(btn);
+      logDebug("Debug mode toggled", debugEnabled);
+    });
+    document.body.appendChild(btn);
+  }
+
+  function updateExportProgress(current, total, status) {
+    const btn = document.getElementById(BUTTON_ID);
+    if (!btn) {
+      return;
+    }
+    if (status) {
+      btn.textContent = status;
+    } else if (total > 0) {
+      btn.textContent = `导出中 ${current}/${total}`;
+    } else {
+      btn.textContent = `已收集 ${current} 题`;
+    }
+  }
+
+  function updateDebugToggle(btn) {
+    const target = btn || document.getElementById(DEBUG_TOGGLE_ID);
+    if (!target) {
+      return;
+    }
+    target.textContent = debugEnabled ? "调试模式: 开" : "调试模式: 关";
+  }
+
+  function logDebug(message, payload) {
+    if (!debugEnabled) {
+      return;
+    }
+    if (typeof payload === "undefined") {
+      console.log("[Ulearning Markdown Exporter][DEBUG]", message);
+    } else {
+      console.log("[Ulearning Markdown Exporter][DEBUG]", message, payload);
+    }
+  }
+
+  async function exportCourseware() {
+    const { courseId, classId } = extractIdsFromUrl();
+    if (!courseId || !classId) {
+      throw new Error("未能从地址栏解析到 courseId 或 classId。");
+    }
+
+    notify("开始导出课件题目...", true);
+
+    const directoryResp = await requestEndpoint(
+      "course_directory",
+      { courseId, classId }
+    );
+
+    if (!directoryResp || !directoryResp.success || !directoryResp.data) {
+      throw new Error("获取课程目录失败，请确认已登录且具备权限。");
+    }
+
+    const courseData = normalizeDirectory(directoryResp.data);
+    const courseNameRaw = courseData.coursename || `course_${courseId}`;
+    const courseNameSanitized = sanitizeFilename(courseNameRaw);
+    const chapters = Array.isArray(courseData.chapters) ? courseData.chapters : [];
+
+    if (!chapters.length) {
+      throw new Error("课程目录中未发现章节。");
+    }
+
+    const markdownParts = [];
+    markdownParts.push(`# ${courseNameRaw} - 课件题目汇总\n\n`);
+
+    let questionCounter = 0;
+
+    for (const chapter of chapters) {
+      const chapterTitle = chapter.nodetitle || chapter.title || "未命名专题";
+      const chapterNodeId = chapter.nodeid || chapter.id;
+      markdownParts.push(`## ${chapterTitle}\n\n`);
+
+      if (!chapterNodeId) {
+        markdownParts.push("> 未找到章节 nodeId，跳过该章节。\n\n");
+        continue;
+      }
+
+      const chapterContentResp = await requestEndpoint(
+        "chapter_content",
+        { nodeId: chapterNodeId }
+      );
+
+      if (!chapterContentResp || !chapterContentResp.data) {
+        markdownParts.push(
+          "> 获取章节内容失败，可能没有练习题或需要重新登录。\n\n"
+        );
+        continue;
+      }
+
+      const itemList = normalizeChapterContent(chapterContentResp.data);
+      for (const itemDTO of itemList) {
+        const wholepageDTOList = itemDTO.wholepageDTOList || [];
+        for (const wholepageDTO of wholepageDTOList) {
+          if (wholepageDTO.contentType !== 7) {
+            continue;
+          }
+          const unitTitle = wholepageDTO.content || "未命名单元";
+          const parentId = wholepageDTO.id;
+          markdownParts.push(`### ${unitTitle}\n\n`);
+
+          const coursepageList = wholepageDTO.coursepageDTOList || [];
+          let questionsFound = false;
+
+          for (const coursepage of coursepageList) {
+            const questions = normalizeQuestions(coursepage);
+            if (!questions.length) {
+              continue;
+            }
+            questionsFound = true;
+
+            for (const question of questions) {
+              questionCounter += 1;
+              const questionId = question.questionid;
+              const questionTypeCode = question.type;
+              const questionTypeName = QUESTION_TYPE_NAME[questionTypeCode] || `未知题型(${questionTypeCode})`;
+              const titleHtml = question.title || "";
+              const titleText = htmlToText(titleHtml) || "(题干缺失)";
+              const choices = question.choiceitemModels || [];
+
+              const answerResp = questionId
+                ? await requestEndpoint("question_answer", {
+                    questionId,
+                    parentId
+                  })
+                : null;
+
+              const answerInfo = extractAnswer(answerResp);
+
+              markdownParts.push(`#### ${questionCounter}. (${questionTypeName}) QID: ${questionId || "-"}\n`);
+              markdownParts.push(`**题干:**\n${titleText}\n\n`);
+
+              if (choices.length) {
+                markdownParts.push("**选项:**\n");
+                choices.forEach((choice, idx) => {
+                  const label = choice.option || String.fromCharCode(65 + idx);
+                  const text = htmlToText(choice.title || "");
+                  markdownParts.push(`- ${label}. ${text || "(无内容)"}`);
+                });
+                markdownParts.push("\n");
+              }
+
+              markdownParts.push(
+                `**正确答案:**\n${answerInfo || "未获取到"}\n---\n`
+              );
+            }
+          }
+
+          if (!questionsFound) {
+            markdownParts.push(
+              "> 当前单元未检测到题目。\n\n"
+            );
+          }
+        }
+      }
+    }
+
+    if (questionCounter === 0) {
+      markdownParts.push("在选定专题中未找到练习题。\n\n");
+    }
+
+    const markdownContent = markdownParts.join("\n");
+    const filename = `${courseNameSanitized}_课件题目.md`;
+    await downloadMarkdown(filename, markdownContent);
+    notify(`导出完成，共收集 ${questionCounter} 道题目。`);
+  }
+
+  async function toggleAutoExport() {
+    if (autoExportState.running) {
+      stopAutoExport();
+      return;
+    }
+    autoExportState.running = true;
+    updateExportProgress(0, 0, "启动中...");
+    notify("开始导出...", true);
+    try {
+      await exportViaAPI();
+    } finally {
+      stopAutoExport();
+    }
+  }
+
+  async function exportViaAPI() {
+    try {
+      const { courseId, classId } = extractIdsFromUrl();
+      if (!courseId || !classId) {
+        throw new Error("未能从地址栏解析到 courseId 或 classId");
+      }
+
+      updateExportProgress(0, 0, "获取课程目录...");
+      const directoryResp = await requestEndpoint("course_directory", { courseId, classId });
+
+      if (!directoryResp || !directoryResp.success || !directoryResp.data) {
+        throw new Error("获取课程目录失败");
+      }
+
+      const courseData = normalizeDirectory(directoryResp.data);
+      const courseName = courseData.coursename || `course_${courseId}`;
+      const chapters = Array.isArray(courseData.chapters) ? courseData.chapters : [];
+
+      logDebug("Course data loaded", { courseName, chaptersCount: chapters.length });
+
+      if (!chapters.length) {
+        throw new Error("课程目录中未发现章节");
+      }
+
+      const markdownParts = [`# ${courseName} - 课件题目\n\n`];
+      let totalQuestions = 0;
+
+      for (let i = 0; i < chapters.length; i++) {
+        try {
+          const chapter = chapters[i];
+          const chapterTitle = chapter.nodetitle || chapter.title || "未命名章节";
+          const chapterNodeId = chapter.nodeid || chapter.id;
+
+          updateExportProgress(i + 1, chapters.length, `处理: ${chapterTitle}`);
+          logDebug("Processing chapter", { chapterTitle, chapterNodeId, index: i + 1 });
+
+          markdownParts.push(`## ${chapterTitle}\n\n`);
+
+          if (!chapterNodeId) {
+            markdownParts.push("> 未找到章节 ID，跳过\n\n");
+            logDebug("Chapter skipped - no ID");
+            continue;
+          }
+
+          const chapterContentResp = await requestEndpoint("chapter_content", { nodeId: chapterNodeId });
+
+          if (!chapterContentResp || !chapterContentResp.data) {
+            markdownParts.push("> 获取章节内容失败\n\n");
+            logDebug("Chapter content fetch failed");
+            continue;
+          }
+
+          const itemList = normalizeChapterContent(chapterContentResp.data);
+          logDebug("Chapter content normalized", { itemsCount: itemList.length });
+
+          for (const itemDTO of itemList) {
+            const wholepageDTOList = itemDTO.wholepageDTOList || [];
+
+            for (const wholepageDTO of wholepageDTOList) {
+              if (wholepageDTO.contentType !== 7) continue;
+
+              const unitTitle = wholepageDTO.content || "未命名单元";
+              const parentId = wholepageDTO.id;
+              markdownParts.push(`### ${unitTitle}\n\n`);
+
+              const coursepageList = wholepageDTO.coursepageDTOList || [];
+              let hasQuestions = false;
+
+              for (const coursepage of coursepageList) {
+                const questions = normalizeQuestions(coursepage);
+                if (!questions.length) continue;
+
+                hasQuestions = true;
+                logDebug("Found questions in unit", { unitTitle, questionsCount: questions.length });
+
+                for (const question of questions) {
+                  totalQuestions++;
+                  const questionId = question.questionid;
+                  const questionTypeCode = question.type;
+                  const questionTypeName = QUESTION_TYPE_NAME[questionTypeCode] || `未知题型(${questionTypeCode})`;
+                  const titleText = htmlToText(question.title || "") || "(题干缺失)";
+                  const choices = question.choiceitemModels || [];
+
+                  let answerText = "";
+                  if (questionId && parentId) {
+                    try {
+                      const answerResp = await requestEndpoint("question_answer", { questionId, parentId });
+                      answerText = extractAnswer(answerResp);
+                    } catch (err) {
+                      logDebug("Failed to fetch answer", { questionId, err });
+                    }
+                  }
+
+                  markdownParts.push(`#### ${totalQuestions}. (${questionTypeName}) QID: ${questionId || "-"}\n`);
+                  markdownParts.push(`**题干:**\n${titleText}\n\n`);
+
+                  if (choices.length) {
+                    markdownParts.push("**选项:**\n");
+                    choices.forEach((choice, idx) => {
+                      const label = choice.option || String.fromCharCode(65 + idx);
+                      const text = htmlToText(choice.title || "");
+                      markdownParts.push(`- ${label}. ${text || "(无内容)"}\n`);
+                    });
+                    markdownParts.push("\n");
+                  }
+
+                  markdownParts.push(`**正确答案:**\n${answerText || "未获取到"}\n---\n\n`);
+                  updateExportProgress(totalQuestions, 0);
+                }
+              }
+
+              if (!hasQuestions) {
+                markdownParts.push("> 当前单元未检测到题目\n\n");
+              }
+            }
+          }
+
+          logDebug("Chapter completed", { chapterTitle, totalQuestionsNow: totalQuestions });
+        } catch (chapterErr) {
+          logDebug("Error processing chapter", chapterErr);
+          markdownParts.push(`> 处理章节时出错: ${chapterErr.message}\n\n`);
+        }
+      }
+
+      if (totalQuestions === 0) {
+        markdownParts.push("未找到练习题\n\n");
+      }
+
+      logDebug("All chapters processed", { totalQuestions, chaptersCount: chapters.length });
+
+      updateExportProgress(0, 0, "生成文件中...");
+      const markdownContent = markdownParts.join("");
+      logDebug("Markdown generated", { contentLength: markdownContent.length });
+
+      const filename = `${sanitizeFilename(courseName)}_课件题目.md`;
+      logDebug("Filename prepared", { filename });
+
+      await downloadMarkdown(filename, markdownContent);
+
+      updateExportProgress(0, 0, `完成! ${totalQuestions} 题`);
+      notify(`导出完成，共 ${totalQuestions} 道题目`);
+      await delay(2000);
+    } catch (err) {
+      logDebug("Export failed with error", err);
+      throw err;
+    }
+  }
+
+  async function runAutoExportLoop() {
+    let safetyCounter = 0;
+    let pageCount = 0;
+
+    while (autoExportState.running) {
+      safetyCounter += 1;
+      if (safetyCounter > 600) {
+        logDebug("Auto export reached safety iteration limit", safetyCounter);
+        break;
+      }
+
+      closeActiveModals();
+
+      const previousPageId = getActivePageId();
+      const parentId = getCurrentParentId();
+      const pageTitle = getActivePageTitle();
+      logDebug("Scanning page", { previousPageId, parentId, pageTitle });
+
+      if (!autoExportState.visitedPageIds.has(previousPageId)) {
+        pageCount += 1;
+        updateExportProgress(autoExportState.totalQuestions, 0, `扫描第 ${pageCount} 页...`);
+
+        const questions = await collectQuestionsFromDom(parentId, pageTitle);
+        if (questions.length) {
+          autoExportState.pageResults.push({ pageId: previousPageId, pageTitle, questions });
+          autoExportState.visitedPageIds.add(previousPageId);
+          autoExportState.totalQuestions += questions.length;
+          updateExportProgress(autoExportState.totalQuestions, 0);
+          logDebug("Collected questions", { pageTitle, count: questions.length });
+        } else {
+          logDebug("No questions detected", { pageTitle });
+          autoExportState.visitedPageIds.add(previousPageId);
+        }
+      } else {
+        logDebug("Page already processed", previousPageId);
+      }
+
+      const moved = await goToNextPage();
+      if (!moved) {
+        logDebug("Next page not available, stopping");
+        break;
+      }
+      await waitForPageChange(previousPageId);
+      await delay(250);
+    }
+
+    if (!autoExportState.pageResults.length) {
+      updateExportProgress(0, 0, "未找到题目");
+      notify("未捕获到任何题目", true);
+      await delay(2000);
+      return;
+    }
+
+    updateExportProgress(0, 0, "生成文件中...");
+    const markdown = buildAutoMarkdown(autoExportState.pageResults);
+    const filename = `${sanitizeFilename(getCourseName()) || "course"}_导出.md`;
+    await downloadMarkdown(filename, markdown);
+    updateExportProgress(0, 0, `完成! ${autoExportState.totalQuestions} 题`);
+    notify(`导出完成，共 ${autoExportState.totalQuestions} 道题目`);
+    await delay(2000);
+  }
+
+  function stopAutoExport() {
+    autoExportState.running = false;
+  }
+
+  function closeActiveModals() {
+    const modal = document.querySelector(".modal.fade.in");
+    if (!modal) {
+      return;
+    }
+
+    const modalId = modal.getAttribute("id");
+    logDebug("Detected modal", modalId);
+
+    if (modalId === "statModal") {
+      const btn = modal.querySelector("#statModal .btn-hollow");
+      if (btn) {
+        btn.click();
+        logDebug("Closed statModal");
+        return;
+      }
+    }
+
+    if (modalId === "alertModal") {
+      const hollowBtn = modal.querySelector("#alertModal .btn-hollow");
+      if (hollowBtn) {
+        hollowBtn.click();
+        logDebug("Closed alertModal with hollow button");
+        return;
+      }
+      const submitBtn = modal.querySelector("#alertModal .btn-submit");
+      if (submitBtn) {
+        submitBtn.click();
+        logDebug("Closed alertModal with submit button");
+        return;
+      }
+    }
+
+    const closeBtn = modal.querySelector(".btn-hollow, .btn-submit, .close, [data-dismiss='modal']");
+    if (closeBtn) {
+      closeBtn.click();
+      logDebug("Closed modal with generic button");
+    }
+  }
+
+  async function collectQuestionsFromDom(parentId, pageTitle) {
+    const lookupSelectors = [
+      ".question-element-node",
+      ".question-item",
+      ".question-area .question-wrapper"
+    ];
+    const nodes = new Set();
+    lookupSelectors.forEach((selector) => {
+      document.querySelectorAll(selector).forEach((node) => nodes.add(node));
+    });
+
+    const results = [];
+    const seenIds = new Set();
+
+    for (const node of nodes) {
+      const meta = extractQuestionMeta(node, pageTitle);
+      if (!meta || !meta.questionId || seenIds.has(meta.questionId)) {
+        continue;
+      }
+      seenIds.add(meta.questionId);
+
+      let answerText = "";
+      try {
+        if (parentId) {
+          answerText = await fetchQuestionAnswer(meta.questionId, parentId);
+        }
+      } catch (err) {
+        logDebug("Failed to fetch answer", { questionId: meta.questionId, err });
+      }
+
+      results.push({ ...meta, answerText });
+    }
+
+    return results;
+  }
+
+  function extractQuestionMeta(node, pageTitle) {
+    const wrapper = node.classList && node.classList.contains("question-wrapper")
+      ? node
+      : node.closest && node.closest(".question-wrapper");
+    const questionWrapper = wrapper || (node.querySelector && node.querySelector(".question-wrapper"));
+
+    const questionId = (() => {
+      if (!questionWrapper) {
+        const hiddenId = node.querySelector && node.querySelector("input[name='questionId']");
+        if (hiddenId && hiddenId.value) {
+          return hiddenId.value;
+        }
+        const dataId = node.getAttribute && node.getAttribute("data-question-id");
+        return dataId || "";
+      }
+      if (questionWrapper.id) {
+        return questionWrapper.id.replace(/^question/i, "");
+      }
+      return questionWrapper.getAttribute("data-id") || "";
+    })();
+
+    if (!questionId) {
+      return null;
+    }
+
+    const typeNode =
+      (node.querySelector && node.querySelector(".question-type-tag")) ||
+      (node.querySelector && node.querySelector(".gray"));
+    const typeLabel = typeNode
+      ? htmlToText(typeNode.textContent || "").replace(/\s/g, "")
+      : "";
+
+    const titleNode =
+      (node.querySelector && node.querySelector(".question-title")) ||
+      (node.querySelector && node.querySelector(".richtext-container.question-title")) ||
+      (node.querySelector && node.querySelector(".question-body")) ||
+      (node.querySelector && node.querySelector(".title"));
+    const titleHtml = titleNode ? titleNode.innerHTML : node.innerHTML || "";
+    const titleText = htmlToText(titleHtml) || "(题干缺失)";
+
+    const questionTypeCode = TYPE_NAME_TO_CODE[typeLabel] || 0;
+    const questionTypeName = typeLabel || QUESTION_TYPE_NAME[questionTypeCode] || "未知题型";
+
+    const choices = extractChoicesFromNode(node);
+
+    return {
+      pageTitle,
+      questionId,
+      questionTypeCode,
+      questionTypeName,
+      titleText,
+      choices
+    };
+  }
+
+  function extractChoicesFromNode(node) {
+    const selectors = [
+      ".choice-list li",
+      ".choice-item",
+      ".options li",
+      ".question-option",
+      ".option-item",
+      "li.option",
+      ".ul-radio li",
+      "label"
+    ];
+    const results = [];
+    const seen = new Set();
+    let idx = 0;
+
+    for (const selector of selectors) {
+      const items = node.querySelectorAll ? node.querySelectorAll(selector) : [];
+      if (!items.length) {
+        continue;
+      }
+      items.forEach((item) => {
+        const text = htmlToText(item.innerHTML || "");
+        if (!text) {
+          return;
+        }
+        const signature = text.slice(0, 120);
+        if (seen.has(signature)) {
+          return;
+        }
+        seen.add(signature);
+        const label =
+          htmlToText(
+            (item.querySelector && item.querySelector(".option-prefix"))
+              ? item.querySelector(".option-prefix").textContent || ""
+              : (item.getAttribute && item.getAttribute("data-option")) || ""
+          ) || String.fromCharCode(65 + idx);
+        results.push({ label, text });
+        idx += 1;
+      });
+      if (results.length) {
+        break;
+      }
+    }
+
+    return results;
+  }
+
+  async function fetchQuestionAnswer(questionId, parentId) {
+    if (!questionId) {
+      return "";
+    }
+    const resp = await requestEndpoint("question_answer", {
+      questionId,
+      parentId
+    });
+    return extractAnswer(resp);
+  }
+
+  function getActivePageId() {
+    const active = document.querySelector(".page-name.active");
+    if (!active) {
+      return "";
+    }
+    const li = active.closest("li[id]");
+    if (li && li.id) {
+      return li.id;
+    }
+    return active.getAttribute("data-id") || active.textContent || "";
+  }
+
+  function getActivePageTitle() {
+    const active = document.querySelector(".page-name.active");
+    if (!active) {
+      return "未命名页面";
+    }
+    return htmlToText(active.textContent || "未命名页面") || "未命名页面";
+  }
+
+  function getCurrentParentId() {
+    const active = document.querySelector(".page-name.active");
+    if (!active) {
+      return "";
+    }
+    const li = active.closest("li[id]");
+    if (!li || !li.id) {
+      return "";
+    }
+    return li.id.replace(/^page/i, "");
+  }
+
+  async function goToNextPage() {
+    const nextBtn = document.querySelector(".next-page-btn.cursor");
+    if (!nextBtn) {
+      return false;
+    }
+    if (
+      nextBtn.classList.contains("disabled") ||
+      nextBtn.hasAttribute("disabled") ||
+      nextBtn.getAttribute("aria-disabled") === "true"
+    ) {
+      return false;
+    }
+    nextBtn.click();
+    logDebug("Clicked next page button");
+    await delay(80);
+    return true;
+  }
+
+  async function waitForPageChange(previousPageId) {
+    const maxAttempts = 40;
+    for (let i = 0; i < maxAttempts; i += 1) {
+      await delay(250);
+      const current = getActivePageId();
+      if (current && current !== previousPageId) {
+        logDebug("Page changed", { previousPageId, current });
+        await delay(200);
+        return;
+      }
+    }
+    logDebug("Page did not change within timeout", previousPageId);
+  }
+
+  function buildAutoMarkdown(pageResults) {
+    const courseTitle = getCourseName();
+    const lines = [];
+    lines.push(`# ${courseTitle || "课件"} - 自动导出题目\n`);
+    lines.push(`导出时间: ${new Date().toLocaleString()}\n`);
+
+    let counter = 0;
+    for (const page of pageResults) {
+      lines.push(`## ${page.pageTitle || "未命名页面"}\n`);
+      for (const question of page.questions) {
+        counter += 1;
+        lines.push(`### ${counter}. (${question.questionTypeName}) QID: ${question.questionId}\n`);
+        lines.push(`**题干:**\n${question.titleText}\n`);
+        if (question.choices && question.choices.length) {
+          lines.push("**选项:**");
+          question.choices.forEach((choice) => {
+            lines.push(`- ${choice.label}. ${choice.text || "(无内容)"}`);
+          });
+          lines.push("");
+        }
+        lines.push(`**正确答案:**\n${question.answerText || "未获取到"}\n---\n`);
+      }
+    }
+
+    return lines.join("\n");
+  }
+
+  function getCourseName() {
+    const titleEl =
+      document.querySelector(".course-title") ||
+      document.querySelector(".course-name") ||
+      document.querySelector(".class-name");
+    if (titleEl) {
+      const text = htmlToText(titleEl.textContent || "");
+      if (text) {
+        return text;
+      }
+    }
+    const header = document.querySelector("title");
+    return header ? htmlToText(header.textContent || "") : "课件";
+  }
+
+  function delay(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  function extractIdsFromUrl() {
+    const url = new URL(window.location.href);
+    const courseId = url.searchParams.get("courseId") || url.searchParams.get("courseid");
+    const classId = url.searchParams.get("classId") || url.searchParams.get("classid");
+    return { courseId, classId };
+  }
+
+  function detectEnvironment(host) {
+    if (host.includes("dgut.edu.cn")) {
+      return "dgut";
+    }
+    return "default";
+  }
+
+  function sanitizeFilename(name) {
+    return (name || "untitled")
+      .replace(/[<>:"/\\|?*]/g, "_")
+      .replace(/\s+/g, "_")
+      .replace(/_+/g, "_")
+      .slice(0, 120);
+  }
+
+  function htmlToText(html) {
+    if (!html || typeof html !== "string") {
+      return "";
+    }
+    const div = document.createElement("div");
+    div.innerHTML = html;
+    const text = div.textContent || div.innerText || "";
+    return text.replace(/\u00A0/g, " ").trim();
+  }
+
+  function extractAnswer(answerResp) {
+    if (!answerResp || !answerResp.success || !answerResp.data) {
+      return "";
+    }
+    const data = answerResp.data;
+    if (Array.isArray(data.correctAnswerList) && data.correctAnswerList.length) {
+      return data.correctAnswerList
+        .map((ans) => htmlToText(String(ans)))
+        .filter(Boolean)
+        .join(" | ");
+    }
+    if (typeof data.answer !== "undefined") {
+      return htmlToText(String(data.answer));
+    }
+    if (Array.isArray(data.subQuestionAnswerDTOList) && data.subQuestionAnswerDTOList.length) {
+      return data.subQuestionAnswerDTOList
+        .map((sub, idx) => {
+          const label = sub.sort || idx + 1;
+          const ans = Array.isArray(sub.correctAnswerList)
+            ? sub.correctAnswerList.map((item) => htmlToText(String(item))).join(" | ")
+            : htmlToText(String(sub.correctAnswerList || ""));
+          return `${label}: ${ans}`;
+        })
+        .join("; ");
+    }
+    return "";
+  }
+
+  function normalizeDirectory(raw) {
+    if (!raw || typeof raw !== "object") {
+      return { chapters: [] };
+    }
+
+    if (Array.isArray(raw.items) && raw.coursename) {
+      const chapters = raw.items.map((item) => ({
+        nodetitle: item.title,
+        nodeid: item.nodeId || item.nodeid || item.id,
+        items: item.children || item.items || []
+      }));
+      return { coursename: raw.coursename, chapters };
+    }
+
+    if (!Array.isArray(raw.chapters) && Array.isArray(raw.items)) {
+      return {
+        coursename: raw.coursename || raw.courseName || "",
+        chapters: raw.items.map((item) => ({
+          nodetitle: item.title,
+          nodeid: item.nodeId || item.nodeid || item.id,
+          items: item.items || item.children || []
+        }))
+      };
+    }
+
+    return raw;
+  }
+
+  function normalizeChapterContent(raw) {
+    if (!raw || typeof raw !== "object") {
+      return [];
+    }
+
+    if (Array.isArray(raw.wholepageItemDTOList)) {
+      return raw.wholepageItemDTOList;
+    }
+
+    if (Array.isArray(raw.items)) {
+      return raw.items.map((item) => ({
+        wholepageDTOList: (item.coursepages || []).map((page) => ({
+          contentType: page.contentType,
+          id: page.relationid || page.id,
+          content: page.title,
+          coursepageDTOList: page.children || page.coursepages || []
+        }))
+      }));
+    }
+
+    if (Array.isArray(raw.coursepages)) {
+      return raw.coursepages.map((page) => ({
+        wholepageDTOList: [
+          {
+            contentType: page.contentType,
+            id: page.relationid || page.id,
+            content: page.title,
+            coursepageDTOList: page.children || page.coursepages || []
+          }
+        ]
+      }));
+    }
+
+    return [];
+  }
+
+  function normalizeQuestions(coursepage) {
+    if (!coursepage) {
+      return [];
+    }
+
+    if (Array.isArray(coursepage.questionDTOList)) {
+      return coursepage.questionDTOList;
+    }
+
+    if (Array.isArray(coursepage.questions)) {
+      return coursepage.questions;
+    }
+
+    if (Array.isArray(coursepage.children)) {
+      return coursepage.children.flatMap((child) => normalizeQuestions(child));
+    }
+
+    return [];
+  }
+
+  async function requestEndpoint(key, payload) {
+    const envOverrides = ENV_ENDPOINTS[ENV] && ENV_ENDPOINTS[ENV][key];
+    const useEnvOnly = Array.isArray(envOverrides) && envOverrides.length > 0;
+    const paths = useEnvOnly ? [...envOverrides] : [...(ENDPOINTS[key] || [])];
+
+    let lastError = null;
+    for (const descriptor of paths) {
+      const { path, method = "POST" } = descriptor;
+      const resolvedPath = typeof path === "function" ? path(payload || {}) : path;
+      try {
+        const resp = await fetchJson(`${API_BASE}${resolvedPath}`, payload, method);
+        if (resp && (resp.success === true || resp.code === 200 || typeof resp === "object")) {
+          return wrapResponse(resp);
+        }
+        lastError = new Error(`接口返回异常: ${JSON.stringify(resp)}`);
+      } catch (err) {
+        lastError = err;
+      }
+    }
+    if (lastError) {
+      throw lastError;
+    }
+    throw new Error(`未找到可用的接口路径: ${key}`);
+  }
+
+  async function fetchJson(url, payload, method) {
+    const isGet = method === "GET";
+    const fetchOptions = {
+      method,
+      credentials: "include",
+      headers: {
+        "Content-Type": "application/json;charset=UTF-8"
+      }
+    };
+
+    const authToken = getAuthToken();
+    if (authToken) {
+      fetchOptions.headers["ua-authorization"] = authToken;
+      fetchOptions.headers["Authorization"] = authToken;
+    }
+
+    if (isGet) {
+      delete fetchOptions.headers["Content-Type"];
+    } else {
+      fetchOptions.body = JSON.stringify(payload || {});
+    }
+
+    const response = await fetch(url, fetchOptions);
+
+    if (!response.ok) {
+      if (response.status === 401 || response.status === 404) {
+        console.warn(`[Ulearning Markdown Exporter] ${response.status} for ${url}`);
+      }
+      throw new Error(`HTTP ${response.status} ${response.statusText}`);
+    }
+
+    return response.json();
+  }
+
+  function getAuthToken() {
+    const candidates = [];
+
+    try {
+      if (window.localStorage) {
+        candidates.push(localStorage.getItem("authorization"));
+        candidates.push(localStorage.getItem("ua-authorization"));
+        candidates.push(localStorage.getItem("token"));
+      }
+      if (window.sessionStorage) {
+        candidates.push(sessionStorage.getItem("authorization"));
+        candidates.push(sessionStorage.getItem("ua-authorization"));
+        candidates.push(sessionStorage.getItem("token"));
+      }
+    } catch (err) {
+      console.warn("[Ulearning Markdown Exporter] Failed to access storage for token", err);
+    }
+
+    const cookie = document.cookie || "";
+    const cookieMatches = cookie.match(/(?:AUTHORIZATION|token|ua-authorization|uaAuthorization)=([^;]+)/gi);
+    if (cookieMatches) {
+      cookieMatches.forEach((entry) => {
+        const parts = entry.split("=");
+        if (parts.length === 2) {
+          candidates.push(parts[1]);
+        }
+      });
+    }
+
+    return candidates.find((item) => typeof item === "string" && item.trim().length > 0) || "";
+  }
+
+  function wrapResponse(resp) {
+    if (typeof resp !== "object" || resp === null) {
+      return { success: false, data: null };
+    }
+    if (typeof resp.success === "boolean") {
+      return resp;
+    }
+    if (typeof resp.code === "number") {
+      return {
+        success: resp.code === 200,
+        data: resp.data,
+        message: resp.message || resp.msg || ""
+      };
+    }
+    return {
+      success: true,
+      data: resp.data || resp
+    };
+  }
+
+  async function downloadMarkdown(filename, content) {
+    logDebug("Starting download", { filename, contentLength: content.length });
+
+    const blob = new Blob([content], { type: "text/markdown;charset=utf-8" });
+    const blobUrl = URL.createObjectURL(blob);
+
+    logDebug("Blob created", { blobUrl, blobSize: blob.size });
+
+    logDebug("Using link download");
+    const link = document.createElement("a");
+    link.href = blobUrl;
+    link.download = filename;
+    link.style.display = "none";
+    document.body.appendChild(link);
+    logDebug("Link created and appended");
+    link.click();
+    logDebug("Link clicked");
+
+    await delay(100);
+
+    document.body.removeChild(link);
+    URL.revokeObjectURL(blobUrl);
+    logDebug("Link removed and blob revoked");
+  }
+
+  function notify(message, silent) {
+    if (typeof GM_notification === "function") {
+      GM_notification({
+        title: "Ulearning Markdown Exporter",
+        text: message,
+        silent: !!silent
+      });
+      return;
+    }
+    if (!silent) {
+      alert(message);
+    } else {
+      console.log("[Ulearning Markdown Exporter]", message);
+    }
+  }
+})();
