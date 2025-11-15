@@ -1,6 +1,29 @@
 # 优学院课件导出工具 (ulearning-course-export)
 
-本项目是一个 Python 脚本，旨在帮助用户从优学院 (ulearning.cn) 导出指定课程的课件内容。主要功能包括提取课程结构、导出章节内的练习题目（包括题干、选项、题型）、下载题目中的图片，并获取正确答案。最终，脚本会将这些信息整理并输出为易于阅读和存档的 Markdown 和 TeX 文件。
+~~本项目是一个 Python 脚本~~，旨在帮助用户从优学院 (ulearning.cn) 导出指定课程的课件内容。主要功能包括提取课程结构、导出章节内的练习题目（包括题干、选项、题型）、下载题目中的图片，并获取正确答案。最终，脚本会将这些信息整理并输出为易于阅读和存档的 Markdown 和 TeX 文件
+
+20251115：该项目还是支持导出优学院的课件题目, 也支持东莞理工学院的课件导出 ~~(其实就是换了个网址而已(笑~~
+
+用户可以选择使用项目内的 pytho代码 和 js脚本文件 [点击访问脚本文件](https://github.com/twj0/ulearning-course-export/blob/main/js/_user.js)
+
+**推荐使用js脚本**
+
+## 使用方法|以js脚本为例
+
+### 0. 下载浏览器拓展, 如果浏览器有`油猴`或者`脚本猫`的可以下滑
+**下载地址：**
+- 油猴/油猴beta：
+   - [edge油猴](https://microsoftedge.microsoft.com/addons/detail/%E7%AF%A1%E6%94%B9%E7%8C%B4/iikmkjmpaadaobahmlepeloendndfphd)
+   - [edge油猴beta](https://microsoftedge.microsoft.com/addons/detail/%E7%AF%A1%E6%94%B9%E7%8C%B4%E6%B5%8B%E8%AF%95%E7%89%88/fcmfnpggmnlmfebfghbfnillijihnkoh)
+   - [chrome油猴](https://chromewebstore.google.com/detail/tampermonkey/dhdgffkkebhmkfjojejmpbldmpobfkfo)
+   - [chrome油猴beta](https://chromewebstore.google.com/detail/tampermonkey/dhdgffkkebhmkfjojejmpbldmpobfkfo)
+
+### 1. 确保你有`脚本猫`或者`油猴`等浏览器拓展
+
+复制粘贴后到优学院就可以使用了
+
+
+---
 
 ## 核心功能
 
@@ -49,7 +72,7 @@
 *   **可选**: 如果您希望将生成的 `.tex` 文件编译为 PDF 文档，您需要在您的计算机上安装一套 LaTeX 发行版（例如 MiKTeX for Windows, TeX Live for Linux/cross-platform, MacTeX for macOS）。
 *   不过这是为了编译PDF的方式而已，我认为最主要的还是json和markdown格式的文件，也生成在子文件夹内
 
-## 使用方法
+## 使用python代码的方法
 
 1.  **克隆或下载仓库**:
     将本项目代码下载到您的本地计算机。
@@ -106,6 +129,10 @@
 *   **文件名**: 脚本已对文件名和文件夹名中的特殊字符进行处理，但仍需注意不同操作系统对文件名的限制。
 *   **负责任使用**: 请勿过于频繁地运行此脚本，避免对优学院服务器造成不必要的负担
 
+---
+
+powered by claudecode & claude sonnet 4.5
+*哈基米快出3 pro 吧，别给A÷画面了*
 
 
 ## 贡献
