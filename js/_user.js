@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         Ulearning Courseware Markdown Exporter
+// @name         Ulearning Course Exporter
 // @namespace    https://github.com/twj0/ulearning-course-export
 // @version      0.2.0
 // @description  Export Ulearning courseware questions as Markdown directly from the browser. Supports manual API export and automatic pagination export with debug mode for Tampermonkey / ScriptCat users.
