@@ -3,7 +3,7 @@
 // @namespace    https://github.com/twj0/ulearning-course-export
 // @version      0.2.0
 // @description  Export Ulearning courseware questions as Markdown directly from the browser. Supports manual API export and automatic pagination export with debug mode for Tampermonkey / ScriptCat users.
-// @author       Cascade
+// @author       twj0 + claudecode
 // @match        https://ua.ulearning.cn/learnCourse/learnCourse.html?*
 // @match        https://ua.ulearning.cn/learnCourseNew/learnCourse.html?*
 // @match        https://ua.ulearning.cn/learnCourse/learnCourseNew.html?*
@@ -385,17 +385,34 @@
       stopAutoExport();
       return;
     }
+
+    const format = await promptExportFormat();
+    if (!format) return;
+
     autoExportState.running = true;
     updateExportProgress(0, 0, "启动中...");
     notify("开始导出...", true);
     try {
-      await exportViaAPI();
+      await exportViaAPI(format);
     } finally {
       stopAutoExport();
     }
   }
 
-  async function exportViaAPI() {
+  function promptExportFormat() {
+    return new Promise((resolve) => {
+      const choice = prompt("选择导出格式:\n1 - Markdown (.md)\n2 - JSON (.json)\n\n请输入 1 或 2:", "1");
+      if (choice === null) {
+        resolve(null);
+      } else if (choice === "2") {
+        resolve("json");
+      } else {
+        resolve("md");
+      }
+    });
+  }
+
+  async function exportViaAPI(format = "md") {
     try {
       const { courseId, classId } = extractIdsFromUrl();
       if (!courseId || !classId) {
@@ -419,6 +436,13 @@
         throw new Error("课程目录中未发现章节");
       }
 
+      const jsonData = {
+        course_id: courseId,
+        course_name: courseName,
+        export_time: new Date().toISOString(),
+        chapters: []
+      };
+
       const markdownParts = [`# ${courseName} - 课件题目\n\n`];
       let totalQuestions = 0;
 
@@ -433,9 +457,16 @@
 
           markdownParts.push(`## ${chapterTitle}\n\n`);
 
+          const chapterJson = {
+            chapter_id: chapterNodeId,
+            chapter_title: chapterTitle,
+            units: []
+          };
+
           if (!chapterNodeId) {
             markdownParts.push("> 未找到章节 ID，跳过\n\n");
             logDebug("Chapter skipped - no ID");
+            jsonData.chapters.push(chapterJson);
             continue;
           }
 
@@ -444,6 +475,7 @@
           if (!chapterContentResp || !chapterContentResp.data) {
             markdownParts.push("> 获取章节内容失败\n\n");
             logDebug("Chapter content fetch failed");
+            jsonData.chapters.push(chapterJson);
             continue;
           }
 
@@ -459,6 +491,12 @@
               const unitTitle = wholepageDTO.content || "未命名单元";
               const parentId = wholepageDTO.id;
               markdownParts.push(`### ${unitTitle}\n\n`);
+
+              const unitJson = {
+                unit_id: parentId,
+                unit_title: unitTitle,
+                questions: []
+              };
 
               const coursepageList = wholepageDTO.coursepageDTOList || [];
               let hasQuestions = false;
@@ -491,17 +529,28 @@
                   markdownParts.push(`#### ${totalQuestions}. (${questionTypeName}) QID: ${questionId || "-"}\n`);
                   markdownParts.push(`**题干:**\n${titleText}\n\n`);
 
+                  const questionJson = {
+                    question_id: questionId,
+                    question_type: questionTypeCode,
+                    question_type_name: questionTypeName,
+                    title: titleText,
+                    options: [],
+                    answer: answerText || ""
+                  };
+
                   if (choices.length) {
                     markdownParts.push("**选项:**\n");
                     choices.forEach((choice, idx) => {
                       const label = choice.option || String.fromCharCode(65 + idx);
                       const text = htmlToText(choice.title || "");
                       markdownParts.push(`- ${label}. ${text || "(无内容)"}\n`);
+                      questionJson.options.push({ label, text: text || "(无内容)" });
                     });
                     markdownParts.push("\n");
                   }
 
                   markdownParts.push(`**正确答案:**\n${answerText || "未获取到"}\n---\n\n`);
+                  unitJson.questions.push(questionJson);
                   updateExportProgress(totalQuestions, 0);
                 }
               }
@@ -509,7 +558,15 @@
               if (!hasQuestions) {
                 markdownParts.push("> 当前单元未检测到题目\n\n");
               }
+
+              if (unitJson.questions.length > 0) {
+                chapterJson.units.push(unitJson);
+              }
             }
+          }
+
+          if (chapterJson.units.length > 0) {
+            jsonData.chapters.push(chapterJson);
           }
 
           logDebug("Chapter completed", { chapterTitle, totalQuestionsNow: totalQuestions });
@@ -523,16 +580,22 @@
         markdownParts.push("未找到练习题\n\n");
       }
 
+      jsonData.total_questions = totalQuestions;
       logDebug("All chapters processed", { totalQuestions, chaptersCount: chapters.length });
 
       updateExportProgress(0, 0, "生成文件中...");
-      const markdownContent = markdownParts.join("");
-      logDebug("Markdown generated", { contentLength: markdownContent.length });
 
-      const filename = `${sanitizeFilename(courseName)}_课件题目.md`;
-      logDebug("Filename prepared", { filename });
-
-      await downloadMarkdown(filename, markdownContent);
+      if (format === "json") {
+        const jsonContent = JSON.stringify(jsonData, null, 2);
+        logDebug("JSON generated", { contentLength: jsonContent.length });
+        const filename = `${sanitizeFilename(courseName)}_课件题目.json`;
+        await downloadJson(filename, jsonContent);
+      } else {
+        const markdownContent = markdownParts.join("");
+        logDebug("Markdown generated", { contentLength: markdownContent.length });
+        const filename = `${sanitizeFilename(courseName)}_课件题目.md`;
+        await downloadMarkdown(filename, markdownContent);
+      }
 
       updateExportProgress(0, 0, `完成! ${totalQuestions} 题`);
       notify(`导出完成，共 ${totalQuestions} 道题目`);
@@ -1186,6 +1249,28 @@
     document.body.removeChild(link);
     URL.revokeObjectURL(blobUrl);
     logDebug("Link removed and blob revoked");
+  }
+
+  async function downloadJson(filename, content) {
+    logDebug("Starting JSON download", { filename, contentLength: content.length });
+
+    const blob = new Blob([content], { type: "application/json;charset=utf-8" });
+    const blobUrl = URL.createObjectURL(blob);
+
+    logDebug("JSON Blob created", { blobUrl, blobSize: blob.size });
+
+    const link = document.createElement("a");
+    link.href = blobUrl;
+    link.download = filename;
+    link.style.display = "none";
+    document.body.appendChild(link);
+    link.click();
+
+    await delay(100);
+
+    document.body.removeChild(link);
+    URL.revokeObjectURL(blobUrl);
+    logDebug("JSON download completed");
   }
 
   function notify(message, silent) {
