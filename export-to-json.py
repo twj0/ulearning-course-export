@@ -7,42 +7,38 @@ from urllib.parse import urlparse, unquote
 import datetime
 from dotenv import load_dotenv
 
+# 导入API模块，优先使用适配器以兼容DGUT环境
+try:
+    from api_adapter import (
+        get_course_directory, get_whole_chapter_page_content,
+        get_question_answer, api_adapter
+    )
+    from api_adapter import APIAdapter  # noqa: F401  # for potential type checking
+    api = api_adapter.current_api
+    API_HEADERS = api.session.headers
+    IMAGE_DOWNLOAD_HEADERS = {
+        "User-Agent": API_HEADERS.get("User-Agent", API_HEADERS.get("user-agent", "Mozilla/5.0")),
+        "Referer": API_HEADERS.get("Referer", API_HEADERS.get("referer", ""))
+    }
+except ImportError:
+    print("警告: 无法导入API适配器，回退到原始API模块")
+    from ulearning_api import (
+        api, get_course_directory, get_whole_chapter_page_content,
+        get_question_answer, API_HEADERS, IMAGE_DOWNLOAD_HEADERS
+    )
+
 # --- Configuration ---
 load_dotenv() # 从 .env 文件加载环境变量
 
 COURSE_ID = os.getenv("COURSE_ID")
 CLASS_ID = os.getenv("CLASS_ID")
 AUTHORIZATION_TOKEN = os.getenv("AUTHORIZATION_TOKEN")
-BASE_API_URL = os.getenv("BASE_API_URL", "https://api.ulearning.cn")
 BASE_OUTPUT_DIR = os.getenv("BASE_OUTPUT_DIR", "ulearning_courseware_exports")
 
-
-# --- API Headers ---
-# 确保在获取配置后再定义 API_HEADERS
+# --- 环境检查 ---
 if not all([COURSE_ID, CLASS_ID, AUTHORIZATION_TOKEN]):
     print("错误：请确保 .env 文件中已配置 COURSE_ID, CLASS_ID, 和 AUTHORIZATION_TOKEN。")
     exit()
-
-API_HEADERS = {
-    "accept": "application/json, text/javascript, */*; q=0.01",
-    "accept-language": "zh",
-    "authorization": AUTHORIZATION_TOKEN,
-    "content-type": "application/json",
-    "origin": "https://ua.ulearning.cn",
-    "referer": "https://ua.ulearning.cn/",
-    "sec-ch-ua": "\"Google Chrome\";v=\"137\", \"Chromium\";v=\"137\", \"Not/A)Brand\";v=\"24\"",
-    "sec-ch-ua-mobile": "?0",
-    "sec-ch-ua-platform": "\"Windows\"",
-    "sec-fetch-dest": "empty",
-    "sec-fetch-mode": "cors",
-    "sec-fetch-site": "same-site",
-    "ua-authorization": AUTHORIZATION_TOKEN,
-    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
-}
-
-IMAGE_DOWNLOAD_HEADERS = {
-    "User-Agent": API_HEADERS["user-agent"]
-}
 
 # --- Helper Functions (保持大部分不变) ---
 def sanitize_filename(filename):
@@ -86,6 +82,44 @@ def download_image(url, save_path, headers): # 保留，但此功能不直接用
         return True
     except Exception as e: print(f"  Error downloading image {url}: {e}"); return False
 
+def has_fill_inputs(html_content: str) -> bool:
+    if not html_content:
+        return False
+    return 'input-wrapper' in html_content or '<input' in html_content.lower()
+
+def build_fill_stem(title_html: str, answers: list) -> str:
+    if not title_html:
+        return "".join([f"{{{ans}}}" if ans else "{___}" for ans in answers])
+    soup = BeautifulSoup(title_html, 'html.parser')
+    blank_nodes = soup.select('span.input-wrapper, input')
+    for idx, node in enumerate(blank_nodes):
+        answer_text = answers[idx] if idx < len(answers) else ''
+        replacement_text = f"{{{answer_text}}}" if answer_text else "{___}"
+        node.replace_with(replacement_text)
+    rendered = get_clean_text_from_html(str(soup))
+    if len(blank_nodes) < len(answers):
+        extra = "".join([f"{{{ans}}}" for ans in answers[len(blank_nodes):]])
+        rendered = f"{rendered} {extra}".strip()
+    return rendered
+
+def infer_platform_question_type(q_data: dict, answer_data: dict) -> str:
+    raw_type = q_data.get("type")
+    inferred = get_question_type_name(raw_type, for_platform=True)
+    has_options = bool(q_data.get("choiceitemModels"))
+    answers = []
+    if answer_data and answer_data.get("correctAnswerList"):
+        answers = [get_clean_text_from_html(str(ans)) for ans in answer_data["correctAnswerList"]]
+    elif answer_data and answer_data.get("answer"):
+        answers = [get_clean_text_from_html(str(answer_data["answer"]))]
+
+    if inferred == "未知题型" and raw_type in (3, 5):
+        inferred = "填空题"
+
+    if inferred == "选择题" and not has_options and (answers or has_fill_inputs(q_data.get("title", ""))):
+        inferred = "填空题"
+
+    return inferred
+
 def get_question_type_name(type_code_from_api, for_platform=False):
     # API 的 type_code: 1:单选, 2:多选, 4:判断, 5:填空, (可能还有其他，如简答)
     # 刷题平台格式: "选择题", "判断题", "填空题", "问答题"
@@ -101,26 +135,6 @@ def get_question_type_name(type_code_from_api, for_platform=False):
         type_map = {1: "单选题", 2: "多选题", 4: "判断题", 5: "填空题", 6: "简答题/论述题"}
         return type_map.get(type_code_from_api, f"API未知题型({type_code_from_api})")
 
-# --- API Call Functions (保持不变) ---
-def get_course_directory(course_id, class_id, headers):
-    url = f"{BASE_API_URL}/course/stu/{course_id}/directory?classId={class_id}"; print(f"Fetching course directory: {url}")
-    try: response = requests.get(url, headers=headers, timeout=15); response.raise_for_status(); return response.json()
-    except Exception as e: print(f"Error fetching course directory: {e}"); return None
-
-def get_whole_chapter_page_content(node_id, headers):
-    url = f"{BASE_API_URL}/wholepage/chapter/stu/{node_id}"; print(f"Fetching whole chapter page content for nodeId: {node_id} from {url}")
-    try: response = requests.get(url, headers=headers, timeout=20); response.raise_for_status(); return response.json()
-    except Exception as e:
-        print(f"Error fetching whole chapter page content for nodeId {node_id}: {e}")
-        if hasattr(e, 'response') and e.response is not None: print(f"Response text: {e.response.text[:500]}")
-        return None
-        
-def get_question_answer(question_id, parent_id, headers):
-    url = f"{BASE_API_URL}/questionAnswer/{question_id}?parentId={parent_id}"
-    try: response = requests.get(url, headers=headers, timeout=10); response.raise_for_status(); return response.json()
-    except Exception as e: print(f"  Error fetching answer for QID {question_id}, PID {parent_id}: {e}"); return None
-
-# --- NEW FUNCTION for Platform Import Format ---
 # --- NEW FUNCTION for Platform Import Format ---
 def generate_json_output(data, output_dir, filename, is_complete_json=False):
     """
@@ -144,11 +158,7 @@ def generate_json_output(data, output_dir, filename, is_complete_json=False):
 
 # --- Main Processing Logic (Modified to collect data for platform format) ---
 def process_courseware_questions():
-    global API_HEADERS
-    API_HEADERS["authorization"] = AUTHORIZATION_TOKEN
-    API_HEADERS["ua-authorization"] = AUTHORIZATION_TOKEN
-
-    directory_data = get_course_directory(COURSE_ID, CLASS_ID, API_HEADERS)
+    directory_data = get_course_directory(COURSE_ID, CLASS_ID)
     if not directory_data: print("Failed to fetch course directory. Exiting."); return
 
     course_name_raw = directory_data.get("coursename", f"UnknownCourse_{COURSE_ID}")
@@ -174,7 +184,7 @@ def process_courseware_questions():
         # (MD/TeX chapter titles can be added here if needed)
         print(f"\nProcessing Chapter: {chapter_title_raw} (NodeID: {chapter_node_id})")
 
-        chapter_content = get_whole_chapter_page_content(chapter_node_id, API_HEADERS)
+        chapter_content = get_whole_chapter_page_content(chapter_node_id)
         if not chapter_content: print(f"  Failed content for chapter '{chapter_title_raw}'."); continue
 
         wholepage_item_list = chapter_content.get("wholepageItemDTOList", [])
@@ -203,19 +213,22 @@ def process_courseware_questions():
                             q_type_code_api = q_data.get("type") # API's type code
                             q_options_raw_api = q_data.get("choiceitemModels", [])
 
-                            # Get platform-specific question type name
-                            platform_entry["题型"] = get_question_type_name(q_type_code_api, for_platform=True)
-                            
-                            # Get clean question stem
-                            question_stem_clean = get_clean_text_from_html(q_title_html)
-                            
                             # Fetch answer
-                            answer_data = get_question_answer(question_id, parent_id, API_HEADERS)
+                            answer_data = get_question_answer(question_id, parent_id)
                             correct_answers_clean_list = []
                             if answer_data and answer_data.get("correctAnswerList"):
                                 correct_answers_clean_list = [get_clean_text_from_html(str(ans)) for ans in answer_data["correctAnswerList"]]
                             elif answer_data and answer_data.get("answer"):
                                 correct_answers_clean_list = [get_clean_text_from_html(str(answer_data["answer"]))]
+
+                            # Infer platform-specific question type
+                            platform_entry["题型"] = infer_platform_question_type(q_data, answer_data)
+                            
+                            # Get clean question stem
+                            if platform_entry["题型"] == "填空题":
+                                question_stem_clean = build_fill_stem(q_title_html, correct_answers_clean_list)
+                            else:
+                                question_stem_clean = get_clean_text_from_html(q_title_html)
                             
                             # --- Populate platform_entry based on question type ---
                             if platform_entry["题型"] == "选择题":
@@ -242,27 +255,7 @@ def process_courseware_questions():
                                 platform_entry["答案"] = "正确" if ans_text in ["true", "t", "对"] else "错误"
                             
                             elif platform_entry["题型"] == "填空题":
-                                temp_stem = question_stem_clean
-                                # Regex to find common placeholders like ___, （）, ()
-                                # This regex looks for sequences of underscores, or parentheses that might contain spaces
-                                placeholder_pattern = r"_{2,}|（\s*）|\(\s*\)"
-                                
-                                # Find all placeholders in the stem
-                                placeholders_in_stem = list(re.finditer(placeholder_pattern, temp_stem))
-                                
-                                # If number of answers matches number of placeholders, replace them
-                                if len(placeholders_in_stem) == len(correct_answers_clean_list) and len(placeholders_in_stem) > 0:
-                                    # Replace from right to left to avoid issues with changing indices
-                                    for i in range(len(placeholders_in_stem) - 1, -1, -1):
-                                        ph_match = placeholders_in_stem[i]
-                                        ans = correct_answers_clean_list[i]
-                                        temp_stem = temp_stem[:ph_match.start()] + "{" + ans + "}" + temp_stem[ph_match.end():]
-                                else: # If no clear placeholders or mismatch, append all answers
-                                    if correct_answers_clean_list:
-                                        formatted_answers = "".join(["{" + ans + "}" for ans in correct_answers_clean_list])
-                                        temp_stem += " " + formatted_answers # Append with a space
-                                
-                                platform_entry["题干"] = temp_stem
+                                platform_entry["题干"] = question_stem_clean
 
                             elif platform_entry["题型"] == "问答题":
                                 platform_entry["题干"] = question_stem_clean

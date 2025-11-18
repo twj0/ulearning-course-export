@@ -36,6 +36,7 @@ MANIFEST
 #  Usually these files are written by a python script from a template
 #  before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
+docs
 project_doing.md
 project_task.md
 project_update_plan.md
@@ -48,3 +49,6 @@ test_api_compatibility.py
 run.bat
 js/1.js
 CLAUDE.md
+update_tokens.py
+diagnose_answer.py
+diagnose_question.py

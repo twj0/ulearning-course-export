@@ -82,8 +82,15 @@
     24: "综合题"
   };
 
+  const FILL_IN_TYPE_CODE = 5;
+
   const TYPE_NAME_TO_CODE = Object.fromEntries(
-    Object.entries(QUESTION_TYPE_NAME).map(([code, name]) => [name, Number(code)])
+    Object.entries(QUESTION_TYPE_NAME).flatMap(([code, name]) => {
+      const normalized = normalizeTypeLabel(name);
+      return normalized && normalized !== name
+        ? [[name, Number(code)], [normalized, Number(code)]]
+        : [[name, Number(code)]];
+    })
   );
 
   const DEBUG_STORAGE_KEY = "ulearning_md_export_debug";
@@ -327,12 +334,10 @@
             for (const question of questions) {
               questionCounter += 1;
               const questionId = question.questionid;
-              const questionTypeCode = question.type;
-              const questionTypeName = QUESTION_TYPE_NAME[questionTypeCode] || `未知题型(${questionTypeCode})`;
+              let questionTypeCode = question.type;
+              let questionTypeName = QUESTION_TYPE_NAME[questionTypeCode] || `未知题型(${questionTypeCode})`;
               const titleHtml = question.title || "";
-              const titleText = htmlToText(titleHtml) || "(题干缺失)";
-              const choices = question.choiceitemModels || [];
-
+              const rawChoices = question.choiceitemModels || [];
               const answerResp = questionId
                 ? await requestEndpoint("question_answer", {
                     questionId,
@@ -340,14 +345,30 @@
                   })
                 : null;
 
-              const answerInfo = extractAnswer(answerResp);
+              const answerValues = collectAnswerValues(answerResp);
+              const answerInfo = answerValues.length ? answerValues.join(" | ") : extractAnswer(answerResp);
+              const answerTypeCode = extractQuestionTypeFromAnswer(answerResp);
+              const treatAsFillBlank = shouldTreatAsFillBlank(questionTypeCode, titleHtml, rawChoices);
+              if (treatAsFillBlank) {
+                questionTypeCode = FILL_IN_TYPE_CODE;
+                questionTypeName = QUESTION_TYPE_NAME[FILL_IN_TYPE_CODE];
+              }
+              if (Number.isFinite(answerTypeCode) && answerTypeCode > 0) {
+                questionTypeCode = answerTypeCode;
+                questionTypeName = QUESTION_TYPE_NAME[questionTypeCode] || questionTypeName;
+              }
+
+              const renderAnswers = answerValues.length ? answerValues : answerInfo ? [answerInfo] : [];
+              const titleText = questionTypeCode === FILL_IN_TYPE_CODE
+                ? renderFillQuestionText(titleHtml, renderAnswers)
+                : htmlToText(titleHtml) || "(题干缺失)";
 
               markdownParts.push(`#### ${questionCounter}. (${questionTypeName}) QID: ${questionId || "-"}\n`);
               markdownParts.push(`**题干:**\n${titleText}\n\n`);
 
-              if (choices.length) {
+              if (questionTypeCode !== FILL_IN_TYPE_CODE && rawChoices.length) {
                 markdownParts.push("**选项:**\n");
-                choices.forEach((choice, idx) => {
+                rawChoices.forEach((choice, idx) => {
                   const label = choice.option || String.fromCharCode(65 + idx);
                   const text = htmlToText(choice.title || "");
                   markdownParts.push(`- ${label}. ${text || "(无内容)"}`);
@@ -513,20 +534,38 @@
                 for (const question of questions) {
                   totalQuestions++;
                   const questionId = question.questionid;
-                  const questionTypeCode = question.type;
-                  const questionTypeName = QUESTION_TYPE_NAME[questionTypeCode] || `未知题型(${questionTypeCode})`;
-                  const titleText = htmlToText(question.title || "") || "(题干缺失)";
+                  let questionTypeCode = question.type;
+                  let questionTypeName = QUESTION_TYPE_NAME[questionTypeCode] || `未知题型(${questionTypeCode})`;
+                  const titleHtml = question.title || "";
                   const choices = question.choiceitemModels || [];
 
+                  let answerValues = [];
                   let answerText = "";
                   if (questionId && parentId) {
                     try {
                       const answerResp = await requestEndpoint("question_answer", { questionId, parentId });
-                      answerText = extractAnswer(answerResp);
+                      answerValues = collectAnswerValues(answerResp);
+                      answerText = answerValues.length ? answerValues.join(" | ") : extractAnswer(answerResp);
+                      const answerTypeCode = extractQuestionTypeFromAnswer(answerResp);
+                      if (Number.isFinite(answerTypeCode) && answerTypeCode > 0) {
+                        questionTypeCode = answerTypeCode;
+                        questionTypeName = QUESTION_TYPE_NAME[questionTypeCode] || questionTypeName;
+                      }
                     } catch (err) {
                       logDebug("Failed to fetch answer", { questionId, err });
                     }
                   }
+
+                  const isFillQuestion = shouldTreatAsFillBlank(questionTypeCode, titleHtml, choices);
+                  if (isFillQuestion && questionTypeCode !== FILL_IN_TYPE_CODE) {
+                    questionTypeCode = FILL_IN_TYPE_CODE;
+                    questionTypeName = QUESTION_TYPE_NAME[FILL_IN_TYPE_CODE];
+                  }
+
+                  const renderAnswers = answerValues.length ? answerValues : (answerText ? [answerText] : []);
+                  const titleText = isFillQuestion
+                    ? renderFillQuestionText(titleHtml, renderAnswers)
+                    : htmlToText(titleHtml) || "(题干缺失)";
 
                   markdownParts.push(`#### ${totalQuestions}. (${questionTypeName}) QID: ${questionId || "-"}\n`);
                   markdownParts.push(`**题干:**\n${titleText}\n\n`);
@@ -536,11 +575,14 @@
                     question_type: questionTypeCode,
                     question_type_name: questionTypeName,
                     title: titleText,
+                    rendered_title: titleText,
                     options: [],
-                    answer: answerText || ""
+                    answer: answerText || "",
+                    answer_list: renderAnswers,
+                    is_fill_question: isFillQuestion
                   };
 
-                  if (choices.length) {
+                  if (!isFillQuestion && choices.length) {
                     markdownParts.push("**选项:**\n");
                     choices.forEach((choice, idx) => {
                       const label = choice.option || String.fromCharCode(65 + idx);
@@ -598,7 +640,7 @@
         const bankData = buildQuestionBank(jsonData);
         const jsonContent = JSON.stringify(bankData, null, 2);
         logDebug("Question bank JSON generated", { contentLength: jsonContent.length, count: bankData.length });
-        const filename = `佛脚刷题题库.json`;
+        const filename = `题库.json`;
         await downloadJson(filename, jsonContent);
       } else {
         const markdownContent = markdownParts.join("");
@@ -744,18 +786,264 @@
       seenIds.add(meta.questionId);
 
       let answerText = "";
+      let finalTypeCode = meta.questionTypeCode;
+      let finalTypeName = meta.questionTypeName;
+      
+      // 添加调试日志
+      logDebug("Type detection", { 
+        questionId: meta.questionId, 
+        initialTypeCode: finalTypeCode,
+        hasChoices: meta.choices && meta.choices.length,
+        domBasedType: meta.questionTypeCode
+      });
+      
+      // 如果DOM识别出的是选择题但没有选项，则认为是填空题
+      if ((finalTypeCode === 1 || finalTypeCode === 2) && (!meta.choices || meta.choices.length === 0)) {
+        logDebug("Fallback to fill-in type due to no choices", { questionId: meta.questionId });
+        finalTypeCode = FILL_IN_TYPE_CODE;
+        finalTypeName = QUESTION_TYPE_NAME[FILL_IN_TYPE_CODE];
+      }
+      
       try {
         if (parentId) {
-          answerText = await fetchQuestionAnswer(meta.questionId, parentId);
+          const answerInfo = await fetchQuestionAnswer(meta.questionId, parentId);
+          answerText = answerInfo.answer || "";
+          if (answerInfo.typeCode) {
+            finalTypeCode = answerInfo.typeCode;
+            finalTypeName = QUESTION_TYPE_NAME[finalTypeCode] || finalTypeName;
+            logDebug("API provided type code", { questionId: meta.questionId, typeCode: finalTypeCode });
+          } else if ((!finalTypeCode || finalTypeCode === 1 || finalTypeCode === 2) && 
+                     (!meta.choices || meta.choices.length === 0)) {
+            // API未返回题型且DOM识别为选择题但没有选项时，设置为填空题
+            logDebug("Fallback to fill-in type due to no choices and no API type", { questionId: meta.questionId });
+            finalTypeCode = FILL_IN_TYPE_CODE;
+            finalTypeName = QUESTION_TYPE_NAME[FILL_IN_TYPE_CODE];
+          }
         }
       } catch (err) {
         logDebug("Failed to fetch answer", { questionId: meta.questionId, err });
       }
 
-      results.push({ ...meta, answerText });
+      results.push({
+        ...meta,
+        questionTypeCode: finalTypeCode,
+        questionTypeName: finalTypeName,
+        answerText
+      });
     }
 
     return results;
+  }
+
+  function detectQuestionTypeCode(targetNode, typeLabel) {
+    if (nodeHasBlankInputs(targetNode)) {
+      return FILL_IN_TYPE_CODE;
+    }
+
+    const normalizedLabel = typeLabel && normalizeTypeLabel(typeLabel);
+    if (normalizedLabel && TYPE_NAME_TO_CODE[normalizedLabel]) {
+      return TYPE_NAME_TO_CODE[normalizedLabel];
+    }
+
+    if (typeLabel && TYPE_NAME_TO_CODE[typeLabel]) {
+      return TYPE_NAME_TO_CODE[typeLabel];
+    }
+
+    const fromClass = extractTypeCodeFromClasses(targetNode);
+    if (fromClass) {
+      return fromClass;
+    }
+
+    return 0;
+  }
+
+  function extractTypeCodeFromClasses(node) {
+    if (!node) {
+      return 0;
+    }
+
+    const checkList = [node, node.querySelector && node.querySelector(".question-title-html")].filter(Boolean);
+    const regex = /question-type-(\d+)/;
+
+    for (const element of checkList) {
+      const classAttr = element.getAttribute && element.getAttribute("class");
+      if (!classAttr) {
+        continue;
+      }
+      const match = classAttr.match(regex);
+      if (match) {
+        const code = Number(match[1]);
+        if (!Number.isNaN(code)) {
+          return code;
+        }
+      }
+    }
+
+    return 0;
+  }
+
+  function normalizeTypeLabel(label) {
+    if (!label || typeof label !== "string") {
+      return "";
+    }
+    return label
+      .replace(/[（）()【】]/g, (ch) => ({ "（": "(", "）": ")", "【": "(", "】": ")" }[ch] || ch))
+      .replace(/\([^)]*\)/g, "")
+      .replace(/（[^）]*）/g, "")
+      .trim();
+  }
+
+  function nodeHasBlankInputs(node) {
+    if (!node || typeof node.querySelectorAll !== "function") {
+      return false;
+    }
+    
+    // 检查常见的填空题输入元素类名
+    const inputs = node.querySelectorAll(".blank-input, .input-wrapper input, input[type='text']");
+    if (inputs && inputs.length) {
+      return true;
+    }
+    
+    // 检查更广泛的节点，包括题目标题等
+    const checkNodes = [node];
+    if (node.querySelector) {
+      const titleNode = node.querySelector(".question-title-html");
+      if (titleNode) checkNodes.push(titleNode);
+      
+      const fillBlankNodes = node.querySelectorAll(".fill-blank");
+      fillBlankNodes.forEach(n => checkNodes.push(n));
+    }
+    
+    for (const checkNode of checkNodes) {
+      const innerHTML = checkNode.innerHTML || "";
+      if (looksLikeFillBlankHtml(innerHTML)) {
+        return true;
+      }
+      
+      // 检查是否有输入框元素
+      if (checkNode.querySelectorAll && checkNode.querySelectorAll("input").length > 0) {
+        return true;
+      }
+    }
+    
+    return false;
+  }
+
+  function looksLikeFillBlankHtml(html) {
+    if (!html || typeof html !== "string") {
+      return false;
+    }
+    const lower = html.toLowerCase();
+    if (lower.includes("blank-input") || lower.includes("input-wrapper") || lower.includes("blankquestion")) {
+      return true;
+    }
+    if (/<input[^>]*>/.test(lower)) {
+      return true;
+    }
+    // 增强对填空题的识别，包括中文括号和下划线模式
+    return /_{3,}/.test(html) || /\(\s*\)/.test(html) || /（\s*）/.test(html);
+  }
+
+  function hasFillBlankInputs(titleHtml) {
+    return looksLikeFillBlankHtml(titleHtml);
+  }
+
+  function renderFillQuestionText(titleHtml, answers) {
+    if (!titleHtml) {
+      if (!answers || !answers.length) {
+        return "";
+      }
+      return answers
+        .map((ans) => (ans ? `{${ans}}` : "{___}"))
+        .join(" ");
+    }
+
+    const container = document.createElement("div");
+    container.innerHTML = titleHtml;
+    const blanks = container.querySelectorAll("span.input-wrapper, input");
+    blanks.forEach((node, idx) => {
+      const ans = answers && answers[idx] ? answers[idx] : "";
+      const replacement = document.createTextNode(ans ? `{${ans}}` : "{___}");
+      node.parentNode && node.parentNode.replaceChild(replacement, node);
+    });
+
+    const raw = container.innerHTML;
+    const text = htmlToText(raw);
+    if (!blanks.length && answers && answers.length) {
+      const extra = answers.map((ans) => (ans ? `{${ans}}` : "{___}")).join(" ");
+      return `${text} ${extra}`.trim();
+    }
+    if (answers && answers.length > blanks.length) {
+      const extra = answers.slice(blanks.length).map((ans) => (ans ? `{${ans}}` : "{___}"))
+        .join(" ");
+      return `${text} ${extra}`.trim();
+    }
+    return text;
+  }
+
+  function shouldTreatAsFillBlank(questionTypeCode, titleHtml, choices) {
+    if (Number(questionTypeCode) === FILL_IN_TYPE_CODE) {
+      return true;
+    }
+
+    const hasChoices = Array.isArray(choices) && choices.length > 0;
+    if (!hasChoices) {
+      return true;
+    }
+
+    return hasFillBlankInputs(titleHtml);
+  }
+
+  function summarizeSubQuestionAnswers(subList = []) {
+    if (!Array.isArray(subList) || !subList.length) {
+      return [];
+    }
+    const total = subList.length;
+    return subList
+      .map((sub, idx) => {
+        const label = total > 1 ? `子题${idx + 1}` : `子题${idx + 1}`;
+        const values = Array.isArray(sub.correctAnswerList)
+          ? sub.correctAnswerList.map((item) => htmlToText(String(item))).filter(Boolean)
+          : sub.answer
+            ? [htmlToText(String(sub.answer))]
+            : [];
+        if (!values.length) {
+          return null;
+        }
+        return `${label}: ${values.join(" | ")}`;
+      })
+      .filter(Boolean);
+  }
+
+  function collectAnswerValues(answerResp) {
+    if (!answerResp || !answerResp.success || !answerResp.data) {
+      return [];
+    }
+
+    const data = answerResp.data || {};
+    const values = [];
+
+    if (Array.isArray(data.correctAnswerList) && data.correctAnswerList.length) {
+      data.correctAnswerList.forEach((item) => {
+        const text = htmlToText(String(item));
+        if (text) {
+          values.push(text);
+        }
+      });
+    } else if (typeof data.answer !== "undefined" && data.answer !== null) {
+      const text = htmlToText(String(data.answer));
+      if (text) {
+        values.push(text);
+      }
+    }
+
+    const subList = data.subQuestionAnswerDTOList;
+    if (Array.isArray(subList) && subList.length) {
+      const summarized = summarizeSubQuestionAnswers(subList);
+      values.push(...summarized);
+    }
+
+    return values;
   }
 
   function extractQuestionMeta(node, pageTitle) {
@@ -786,9 +1074,8 @@
     const typeNode =
       (node.querySelector && node.querySelector(".question-type-tag")) ||
       (node.querySelector && node.querySelector(".gray"));
-    const typeLabel = typeNode
-      ? htmlToText(typeNode.textContent || "").replace(/\s/g, "")
-      : "";
+    const typeLabelRaw = typeNode ? htmlToText(typeNode.textContent || "").replace(/\s/g, "") : "";
+    const typeLabel = normalizeTypeLabel(typeLabelRaw);
 
     const titleNode =
       (node.querySelector && node.querySelector(".question-title")) ||
@@ -798,8 +1085,8 @@
     const titleHtml = titleNode ? titleNode.innerHTML : node.innerHTML || "";
     const titleText = htmlToText(titleHtml) || "(题干缺失)";
 
-    const questionTypeCode = TYPE_NAME_TO_CODE[typeLabel] || 0;
-    const questionTypeName = typeLabel || QUESTION_TYPE_NAME[questionTypeCode] || "未知题型";
+    const questionTypeCode = detectQuestionTypeCode(questionWrapper || node, typeLabel);
+    const questionTypeName = QUESTION_TYPE_NAME[questionTypeCode] || typeLabelRaw || "未知题型";
 
     const choices = extractChoicesFromNode(node);
 
@@ -862,13 +1149,43 @@
 
   async function fetchQuestionAnswer(questionId, parentId) {
     if (!questionId) {
-      return "";
+      return { answer: "", typeCode: null };
     }
     const resp = await requestEndpoint("question_answer", {
       questionId,
       parentId
     });
-    return extractAnswer(resp);
+    return {
+      answer: extractAnswer(resp),
+      typeCode: extractQuestionTypeFromAnswer(resp)
+    };
+  }
+
+  function extractQuestionTypeFromAnswer(answerResp) {
+    const data = answerResp && answerResp.data;
+    if (!data || typeof data !== "object") {
+      return null;
+    }
+
+    const candidates = [
+      data.questionType,
+      data.questiontype,
+      data.type,
+      data.questionTypeCode,
+      data.questionDto && data.questionDto.questionType,
+      data.questionDto && data.questionDto.type,
+      data.question && data.question.questionType,
+      data.question && data.question.type
+    ];
+
+    for (const candidate of candidates) {
+      const num = Number(candidate);
+      if (Number.isFinite(num) && num > 0) {
+        return num;
+      }
+    }
+
+    return null;
   }
 
   function getActivePageId() {
@@ -941,17 +1258,22 @@
       return result;
     }
 
-    const isChoiceType = function (t) {
-      return t === 1 || t === 2 || t === 3;
+    const isChoiceType = function (q) {
+      const type = q.question_type;
+      const inferredFill = Boolean(q.is_fill_question);
+      if (inferredFill) {
+        return false;
+      }
+      return type === 1 || type === 2 || type === 3;
     };
-    const isJudgeType = function (t) {
-      return t === 4;
+    const isJudgeType = function (q) {
+      return q.question_type === 4;
     };
-    const isBlankType = function (t) {
-      return t === 5 || t === 17;
+    const isBlankType = function (q) {
+      return q.is_fill_question || q.question_type === 5 || q.question_type === 17;
     };
-    const isQaType = function (t) {
-      return t === 6;
+    const isQaType = function (q) {
+      return q.question_type === 6;
     };
 
     for (const chapter of jsonData.chapters) {
@@ -959,11 +1281,11 @@
       for (const unit of units) {
         const questions = Array.isArray(unit.questions) ? unit.questions : [];
         for (const q of questions) {
-          const typeCode = q.question_type;
-          const title = q.title || "";
+          const title = q.rendered_title || q.title || "";
           const rawAnswer = (q.answer || "").trim();
+          const answerList = Array.isArray(q.answer_list) ? q.answer_list : [];
 
-          if (isChoiceType(typeCode)) {
+          if (isChoiceType(q)) {
             const options = Array.isArray(q.options)
               ? q.options.map((o) => o.text || "")
               : [];
@@ -980,7 +1302,7 @@
               答案: ans || rawAnswer,
               解析: ""
             });
-          } else if (isJudgeType(typeCode)) {
+          } else if (isJudgeType(q)) {
             let ans = rawAnswer;
             if (/^(T|对|正确)/i.test(rawAnswer)) {
               ans = "正确";
@@ -993,19 +1315,22 @@
               答案: ans || rawAnswer,
               解析: ""
             });
-          } else if (isBlankType(typeCode)) {
-            const parts = rawAnswer
-              ? rawAnswer.split(/[\|；;，,]+/).map((s) => s.trim()).filter(Boolean)
-              : [];
+          } else if (isBlankType(q)) {
+            const parts = answerList.length
+              ? answerList
+              : rawAnswer
+                ? rawAnswer.split(/[\|；;，,]+/).map((s) => s.trim()).filter(Boolean)
+                : [];
             const answersInBraces = parts.length
               ? parts.map((a) => "{" + a + "}").join("")
               : "";
             result.push({
               题型: "填空题",
               题干: title + answersInBraces,
+              答案: parts.join(" | ") || rawAnswer,
               解析: ""
             });
-          } else if (isQaType(typeCode)) {
+          } else if (isQaType(q)) {
             result.push({
               题型: "问答题",
               题干: title,

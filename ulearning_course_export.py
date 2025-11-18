@@ -7,39 +7,48 @@ from urllib.parse import urlparse, unquote
 import datetime
 from dotenv import load_dotenv
 
+# 导入API模块
+try:
+    from api_adapter import (
+        get_course_directory, get_whole_chapter_page_content, 
+        get_question_answer, get_user_info, get_course_remaining, get_study_record,
+        send_study_heartbeat, sync_personal_data, api_adapter
+    )
+    # 从适配器获取当前API实例
+    api = api_adapter.current_api
+    # 定义请求头
+    API_HEADERS = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "authorization": os.getenv("AUTHORIZATION_TOKEN"),
+        "ua-authorization": os.getenv("UA_AUTHORIZATION_TOKEN", "18016158863D724D29B3334BD9853C36"),
+        "Content-Type": "application/json;charset=UTF-8"
+    }
+    IMAGE_DOWNLOAD_HEADERS = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+        "Referer": os.getenv("BASE_API_URL", "https://ua.dgut.edu.cn")
+    }
+except ImportError:
+    print("警告: 无法导入API适配器，回退到原始API模块")
+    from ulearning_api import (
+        api, get_course_directory, get_whole_chapter_page_content, 
+        get_question_answer, API_HEADERS, IMAGE_DOWNLOAD_HEADERS,
+        get_user_info, get_course_remaining, get_study_record,
+        send_study_heartbeat, sync_personal_data
+    )
+
 # --- Configuration ---
 load_dotenv()
 
 COURSE_ID = os.getenv("COURSE_ID")
 CLASS_ID = os.getenv("CLASS_ID")
 AUTHORIZATION_TOKEN = os.getenv("AUTHORIZATION_TOKEN")
-BASE_API_URL = os.getenv("BASE_API_URL", "https://api.ulearning.cn")
 BASE_OUTPUT_DIR = os.getenv("BASE_OUTPUT_DIR", "ulearning_courseware_exports")
 
 # User choices - will be set by prompts
 SAVE_INDIVIDUAL_QUESTION_FILES = False # Default to False
 SELECTED_CHAPTERS_TO_PROCESS = [] # Default to empty, meaning process all or prompt
-
-API_HEADERS = {
-    "accept": "application/json, text/javascript, */*; q=0.01",
-    "accept-language": "zh",
-    "authorization": AUTHORIZATION_TOKEN,
-    "content-type": "application/json",
-    "origin": "https://ua.ulearning.cn", 
-    "referer": "https://ua.ulearning.cn/", 
-    "sec-ch-ua": "\"Google Chrome\";v=\"137\", \"Chromium\";v=\"137\", \"Not/A)Brand\";v=\"24\"",
-    "sec-ch-ua-mobile": "?0",
-    "sec-ch-ua-platform": "\"Windows\"",
-    "sec-fetch-dest": "empty",
-    "sec-fetch-mode": "cors",
-    "sec-fetch-site": "same-site",
-    "ua-authorization": AUTHORIZATION_TOKEN, 
-    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
-}
-
-IMAGE_DOWNLOAD_HEADERS = { 
-    "User-Agent": API_HEADERS["user-agent"]
-}
 
 # --- Helper Functions ---
 def sanitize_filename(filename):
@@ -67,6 +76,31 @@ def extract_image_urls_from_html(html_content):
     img_tags = soup.find_all('img')
     urls = [img['src'].strip() for img in img_tags if 'src' in img.attrs and img['src'] and img['src'].strip()]
     return list(set(urls))
+
+def has_fill_blank_inputs(html_content):
+    if not html_content or not isinstance(html_content, str):
+        return False
+    lower_html = html_content.lower()
+    return 'input-wrapper' in lower_html or '<input' in lower_html
+
+def render_fill_question_text(title_html, answers):
+    if not title_html:
+        if not answers:
+            return ""
+        return " ".join([f"{{{ans}}}" if ans else "{___}" for ans in answers])
+
+    soup = BeautifulSoup(title_html, 'html.parser')
+    blank_nodes = soup.select('span.input-wrapper, input')
+    for idx, node in enumerate(blank_nodes):
+        answer_text = answers[idx] if idx < len(answers) else ''
+        replacement = f"{{{answer_text}}}" if answer_text else "{___}"
+        node.replace_with(replacement)
+
+    rendered = get_clean_text_from_html(str(soup))
+    if len(blank_nodes) < len(answers):
+        extra = " ".join([f"{{{ans}}}" for ans in answers[len(blank_nodes):]])
+        rendered = f"{rendered} {extra}".strip()
+    return rendered.strip()
 
 def escape_latex_special_chars(text):
     if not text: return ""
@@ -97,48 +131,17 @@ def get_question_type_name(type_code):
     type_map = {1: "单选题", 2: "多选题", 3: "不定项选择题", 4: "判断题", 5: "填空题", 6: "简答题/论述题", 7: "文件题"} # Added 7 for completeness
     return type_map.get(type_code, f"未知题型({type_code})")
 
-# --- API Call Functions ---
-def get_course_directory(course_id, class_id, headers):
-    url = f"{BASE_API_URL}/course/stu/{course_id}/directory?classId={class_id}"
-    print(f"Fetching course directory: {url}")
-    try:
-        response = requests.get(url, headers=headers, timeout=15)
-        response.raise_for_status()
-        return response.json()
-    except Exception as e:
-        print(f"Error fetching course directory: {e}")
-        return None
-
-def get_whole_chapter_page_content(node_id, headers):
-    url = f"{BASE_API_URL}/wholepage/chapter/stu/{node_id}"
-    print(f"Fetching whole chapter page content for nodeId: {node_id} from {url}")
-    try:
-        response = requests.get(url, headers=headers, timeout=20)
-        response.raise_for_status()
-        return response.json()
-    except Exception as e:
-        print(f"Error fetching whole chapter page content for nodeId {node_id}: {e}")
-        if hasattr(e, 'response') and e.response is not None:
-            print(f"Response text: {e.response.text[:500]}")
-        return None
-        
-def get_question_answer(question_id, parent_id, headers):
-    url = f"{BASE_API_URL}/questionAnswer/{question_id}?parentId={parent_id}"
-    try:
-        response = requests.get(url, headers=headers, timeout=10)
-        response.raise_for_status()
-        return response.json()
-    except Exception as e:
-        print(f"  Error fetching answer for QID {question_id}, PID {parent_id}: {e}")
-        return None
-
 # --- Main Processing Logic ---
 def process_courseware_questions():
     global API_HEADERS, SAVE_INDIVIDUAL_QUESTION_FILES, SELECTED_CHAPTERS_TO_PROCESS
-    API_HEADERS["authorization"] = AUTHORIZATION_TOKEN
-    API_HEADERS["ua-authorization"] = AUTHORIZATION_TOKEN
+    
+    # 更新API实例的headers
+    api.session.headers.update({
+        "authorization": AUTHORIZATION_TOKEN,
+        "ua-authorization": os.getenv("UA_AUTHORIZATION_TOKEN", "18016158863D724D29B3334BD9853C36")
+    })
 
-    directory_data = get_course_directory(COURSE_ID, CLASS_ID, API_HEADERS)
+    directory_data = get_course_directory(COURSE_ID, CLASS_ID)
     if not directory_data:
         print("Failed to fetch course directory. Exiting.")
         return
@@ -223,7 +226,7 @@ def process_courseware_questions():
         all_course_questions_md_content.append(f"## {chapter_title_raw}\n\n")
         all_course_questions_tex_content.append(f"\\section*{{{escape_latex_special_chars(chapter_title_raw)}}}\n\\hrulefill\n")
 
-        chapter_content = get_whole_chapter_page_content(chapter_node_id, API_HEADERS)
+        chapter_content = get_whole_chapter_page_content(chapter_node_id)
         if not chapter_content:
             print(f"  Failed to fetch content for chapter '{chapter_title_raw}'. Skipping.")
             continue
@@ -255,146 +258,171 @@ def process_courseware_questions():
                         questions_found_in_unit = True
                         for q_data in questions_list:
                             question_counter_overall += 1
-                        question_id = q_data.get("questionid")
-                        q_title_html = q_data.get("title", "N/A")
-                        q_type_code = q_data.get("type")
-                        q_type_name = get_question_type_name(q_type_code)
-                        q_options_raw = q_data.get("choiceitemModels", [])
+                            question_id = q_data.get("questionid")
+                            q_title_html = q_data.get("title", "N/A")
+                            q_type_code = q_data.get("type")
+                            q_type_name = get_question_type_name(q_type_code)
+                            q_options_raw = q_data.get("choiceitemModels") or []
 
-                        # Define paths for this question's assets
-                        question_subfolder_relative = os.path.join(
-                            f"chapter_{chapter_node_id}_{chapter_title_sanitized}", 
-                            f"unit_{parent_id}_{unit_title_sanitized}", 
-                            f"question_{question_id}"
-                        )
-                        question_folder_absolute = os.path.join(course_output_dir, question_subfolder_relative)
-                        
-                        # print(f"    Processing Q: {question_id} ({q_type_name})")
+                            # Define paths for this question's assets
+                            answer_data = get_question_answer(question_id, parent_id)
+                            correct_answer_str_list = []
+                            if answer_data and answer_data.get("correctAnswerList"):
+                                correct_answer_str_list = [get_clean_text_from_html(str(ans)) for ans in answer_data["correctAnswerList"]]
+                            elif answer_data and answer_data.get("answer"):
+                                correct_answer_str_list = [get_clean_text_from_html(str(answer_data["answer"]))]
 
-                        answer_data = get_question_answer(question_id, parent_id, API_HEADERS)
-                        correct_answer_str_list = []
-                        if answer_data and answer_data.get("correctAnswerList"):
-                            correct_answer_str_list = [get_clean_text_from_html(str(ans)) for ans in answer_data["correctAnswerList"]]
-                        elif answer_data and answer_data.get("answer"):
-                            correct_answer_str_list = [get_clean_text_from_html(str(answer_data["answer"]))]
-                        
-                        title_text_clean = get_clean_text_from_html(q_title_html)
-                        
-                        # --- Manage individual question folder and info file ---
-                        has_images = False # Flag to check if any image is downloaded for this question
-                        
-                        # Check for images in title
-                        title_images = extract_image_urls_from_html(q_title_html)
-                        if title_images: has_images = True
-                        
-                        # Check for images in options
-                        if q_options_raw:
-                            for opt in q_options_raw:
-                                if extract_image_urls_from_html(opt.get("title","")):
-                                    has_images = True
-                                    break # Found at least one image in options
-                        
-                        # Create question folder if saving details OR if there are images
-                        if SAVE_INDIVIDUAL_QUESTION_FILES or has_images:
-                            os.makedirs(question_folder_absolute, exist_ok=True)
+                            sub_answers = []
+                            if answer_data:
+                                sub_answers = answer_data.get("subQuestionAnswerDTOList") or []
+                            for sub_index, sub_answer in enumerate(sub_answers, 1):
+                                sub_values = []
+                                if sub_answer.get("correctAnswerList"):
+                                    sub_values = [get_clean_text_from_html(str(ans)) for ans in sub_answer["correctAnswerList"]]
+                                elif sub_answer.get("answer"):
+                                    sub_values = [get_clean_text_from_html(str(sub_answer["answer"]))]
+                                joined = " | ".join([value for value in sub_values if value])
+                                if not joined:
+                                    continue
+                                label = f"子题{sub_index}: {joined}" if len(sub_answers) > 1 else joined
+                                correct_answer_str_list.append(label)
 
-                        if SAVE_INDIVIDUAL_QUESTION_FILES:
-                            info_txt_path = os.path.join(question_folder_absolute, "question_info.txt")
-                            with open(info_txt_path, 'w', encoding='utf-8') as f_info:
-                                f_info.write(f"课程名称: {course_name_raw}\n")
-                                f_info.write(f"章节名称: {chapter_title_raw}\n")
-                                f_info.write(f"单元名称: {unit_title_raw}\n")
-                                f_info.write(f"题目ID: {question_id}\n")
-                                f_info.write(f"ParentID (单元ID): {parent_id}\n")
-                                f_info.write(f"题型: {q_type_name}\n\n")
-                                f_info.write(f"【题干】:\n{title_text_clean}\n\n")
-                                if q_options_raw:
-                                    f_info.write("【选项】:\n")
-                                    for opt_idx_info, opt_info in enumerate(q_options_raw):
-                                        opt_title_html_info = opt_info.get("title", "")
-                                        opt_text_clean_info = get_clean_text_from_html(opt_title_html_info)
-                                        opt_soup_info = BeautifulSoup(opt_title_html_info, 'html.parser')
-                                        p_tag_info = opt_soup_info.find('p')
-                                        prefix_info = chr(ord('A') + opt_idx_info) + ". "
-                                        if p_tag_info and len(p_tag_info.get_text(strip=True)) == 1 and p_tag_info.get_text(strip=True).isalpha():
-                                            prefix_text_info = p_tag_info.get_text(strip=True)
-                                            prefix_info = prefix_text_info + ". "
-                                            if opt_text_clean_info.startswith(prefix_text_info):
-                                                opt_text_clean_info = opt_text_clean_info[len(prefix_text_info):].lstrip(". ")
-                                        f_info.write(f"{prefix_info}{opt_text_clean_info}\n")
-                                    f_info.write("\n")
-                                f_info.write(f"【正确答案】:\n{' | '.join(correct_answer_str_list) or '未获取到'}\n")
+                            has_options = bool(q_options_raw)
+                            is_fill_question = (
+                                q_type_code == 5 or
+                                not has_options or
+                                has_fill_blank_inputs(q_title_html)
+                            )
+                            q_type_name = "填空题" if is_fill_question else get_question_type_name(q_type_code)
 
-                        # --- Markdown Content ---
-                        md_q_entry = [f"#### {question_counter_overall}. ({q_type_name}) QID: {question_id}\n"]
-                        md_q_entry.append(f"**题干:**\n{title_text_clean}\n")
-                        for img_idx, img_url in enumerate(title_images): # Use pre-extracted title_images
-                            img_ext = os.path.splitext(urlparse(img_url).path)[1] or '.png'
-                            if not img_ext.startswith('.'): img_ext = '.' + img_ext # Ensure dot
-                            img_filename = f"title_img_{img_idx+1}{img_ext}"
-                            img_save_path = os.path.join(question_folder_absolute, img_filename)
-                            if download_image(img_url, img_save_path, IMAGE_DOWNLOAD_HEADERS):
-                                img_relative_path_for_md = os.path.join(question_subfolder_relative, img_filename).replace("\\", "/")
-                                md_q_entry.append(f"![题干图片 {img_idx+1}]({img_relative_path_for_md})\n")
-                        md_q_entry.append("\n")
+                            if is_fill_question:
+                                title_text_clean = render_fill_question_text(q_title_html, correct_answer_str_list)
+                            else:
+                                title_text_clean = get_clean_text_from_html(q_title_html)
+                            
 
-                        if q_options_raw:
-                            md_q_entry.append("**选项:**\n")
-                            for opt_idx, opt in enumerate(q_options_raw):
-                                opt_title_html = opt.get("title", "")
-                                opt_text_clean = get_clean_text_from_html(opt_title_html)
-                                opt_soup = BeautifulSoup(opt_title_html, 'html.parser')
-                                p_tag = opt_soup.find('p'); prefix = chr(ord('A') + opt_idx) + ". "; option_letter_for_img = chr(ord('A') + opt_idx)
-                                if p_tag and len(p_tag.get_text(strip=True)) == 1 and p_tag.get_text(strip=True).isalpha():
-                                    prefix_text = p_tag.get_text(strip=True); prefix = prefix_text + ". "; option_letter_for_img = prefix_text
-                                    if opt_text_clean.startswith(prefix_text): opt_text_clean = opt_text_clean[len(prefix_text):].lstrip(". ")
-                                md_q_entry.append(f"- {prefix}{opt_text_clean}\n")
-                                for img_idx, img_url in enumerate(extract_image_urls_from_html(opt_title_html)):
-                                    img_ext = os.path.splitext(urlparse(img_url).path)[1] or '.png'
-                                    if not img_ext.startswith('.'): img_ext = '.' + img_ext
-                                    img_filename = f"option_{option_letter_for_img}_img_{img_idx+1}{img_ext}"
-                                    img_save_path = os.path.join(question_folder_absolute, img_filename)
-                                    if download_image(img_url, img_save_path, IMAGE_DOWNLOAD_HEADERS):
-                                        img_relative_path_for_md = os.path.join(question_subfolder_relative, img_filename).replace("\\", "/")
-                                        md_q_entry.append(f"  ![选项 {option_letter_for_img} 图片 {img_idx+1}]({img_relative_path_for_md})\n")
+                            question_subfolder_relative = os.path.join(
+                                f"chapter_{chapter_node_id}_{chapter_title_sanitized}", 
+                                f"unit_{parent_id}_{unit_title_sanitized}", 
+                                f"question_{question_id}"
+                            )
+                            question_folder_absolute = os.path.join(course_output_dir, question_subfolder_relative)
+                            
+                            # --- Manage individual question folder and info file ---
+                            has_images = False # Flag to check if any image is downloaded for this question
+                            
+                            # Check for images in title
+                            title_images = extract_image_urls_from_html(q_title_html)
+                            if title_images: has_images = True
+                            
+                            # Check for images in options
+                            if q_options_raw:
+                                for opt in q_options_raw:
+                                    if extract_image_urls_from_html(opt.get("title","")):
+                                        has_images = True
+                                        break # Found at least one image in options
+                            
+                            # Create question folder if saving details OR if there are images
+                            if SAVE_INDIVIDUAL_QUESTION_FILES or has_images:
+                                os.makedirs(question_folder_absolute, exist_ok=True)
+
+                            if SAVE_INDIVIDUAL_QUESTION_FILES:
+                                info_txt_path = os.path.join(question_folder_absolute, "question_info.txt")
+                                with open(info_txt_path, 'w', encoding='utf-8') as f_info:
+                                    f_info.write(f"课程名称: {course_name_raw}\n")
+                                    f_info.write(f"章节名称: {chapter_title_raw}\n")
+                                    f_info.write(f"单元名称: {unit_title_raw}\n")
+                                    f_info.write(f"题目ID: {question_id}\n")
+                                    f_info.write(f"ParentID (单元ID): {parent_id}\n")
+                                    f_info.write(f"题型: {q_type_name}\n\n")
+                                    f_info.write(f"【题干】:\n{title_text_clean}\n\n")
+                                    if has_options and not is_fill_question:
+                                        f_info.write("【选项】:\n")
+                                        for opt_idx_info, opt_info in enumerate(q_options_raw):
+                                            opt_title_html_info = opt_info.get("title", "")
+                                            opt_text_clean_info = get_clean_text_from_html(opt_title_html_info)
+                                            opt_soup_info = BeautifulSoup(opt_title_html_info, 'html.parser')
+                                            p_tag_info = opt_soup_info.find('p')
+                                            prefix_info = chr(ord('A') + opt_idx_info) + ". "
+                                            if p_tag_info and len(p_tag_info.get_text(strip=True)) == 1 and p_tag_info.get_text(strip=True).isalpha():
+                                                prefix_text_info = p_tag_info.get_text(strip=True)
+                                                prefix_info = prefix_text_info + ". "
+                                                if opt_text_clean_info.startswith(prefix_text_info):
+                                                    opt_text_clean_info = opt_text_clean_info[len(prefix_text_info):].lstrip(". ")
+                                            f_info.write(f"{prefix_info}{opt_text_clean_info}\n")
+                                        f_info.write("\n")
+                                    f_info.write(f"【正确答案】:\n{' | '.join(correct_answer_str_list) or '未获取到'}\n")
+
+                            # --- Markdown Content ---
+                            md_q_entry = [f"#### {question_counter_overall}. ({q_type_name}) QID: {question_id}\n"]
+                            md_q_entry.append(f"**题干:**\n{title_text_clean}\n")
+                            for img_idx, img_url in enumerate(title_images): # Use pre-extracted title_images
+                                img_ext = os.path.splitext(urlparse(img_url).path)[1] or '.png'
+                                if not img_ext.startswith('.'): img_ext = '.' + img_ext # Ensure dot
+                                img_filename = f"title_img_{img_idx+1}{img_ext}"
+                                img_save_path = os.path.join(question_folder_absolute, img_filename)
+                                if download_image(img_url, img_save_path, IMAGE_DOWNLOAD_HEADERS):
+                                    img_relative_path_for_md = os.path.join(question_subfolder_relative, img_filename).replace("\\", "/")
+                                    md_q_entry.append(f"![题干图片 {img_idx+1}]({img_relative_path_for_md})\n")
                             md_q_entry.append("\n")
-                        md_q_entry.append(f"**正确答案:**\n{' | '.join(correct_answer_str_list) or '未获取到'}\n---\n")
-                        all_course_questions_md_content.extend(md_q_entry)
 
-                        # --- TeX Content ---
-                        tex_q_entry = [f"\\subsubsection*{{{question_counter_overall}. ({escape_latex_special_chars(q_type_name)}) \\small QID: {question_id}}}\n"]
-                        title_text_tex = escape_latex_special_chars(title_text_clean).replace('\n\n', '\n\\par\n')
-                        tex_q_entry.append(f"\\textbf{{{escape_latex_special_chars('题干')}:}}\n{title_text_tex}\n")
-                        for img_idx, img_url in enumerate(title_images):
-                            img_ext = os.path.splitext(urlparse(img_url).path)[1] or '.png'
-                            if not img_ext.startswith('.'): img_ext = '.' + img_ext
-                            img_filename = f"title_img_{img_idx+1}{img_ext}"
-                            img_relative_path_for_tex = os.path.join(question_subfolder_relative, img_filename).replace("\\", "/")
-                            if os.path.exists(os.path.join(question_folder_absolute, img_filename)):
-                                tex_q_entry.append(f"\\begin{{center}}\\includegraphics[width=0.8\\textwidth,height=0.25\\textheight,keepaspectratio]{{{img_relative_path_for_tex}}}\\end{{center}}\n")
-                        tex_q_entry.append("\n")
-                        if q_options_raw:
-                            tex_q_entry.append(f"\\textbf{{{escape_latex_special_chars('选项')}:}}\n\\begin{{itemize}}[leftmargin=*]\n")
-                            for opt_idx, opt in enumerate(q_options_raw):
-                                opt_title_html = opt.get("title", ""); opt_text_clean_raw = get_clean_text_from_html(opt_title_html)
-                                opt_soup = BeautifulSoup(opt_title_html, 'html.parser'); p_tag = opt_soup.find('p')
-                                prefix_raw = chr(ord('A') + opt_idx) + ". "; option_letter_for_img = chr(ord('A') + opt_idx)
-                                if p_tag and len(p_tag.get_text(strip=True)) == 1 and p_tag.get_text(strip=True).isalpha():
-                                    prefix_text = p_tag.get_text(strip=True); prefix_raw = prefix_text + ". "; option_letter_for_img = prefix_text
-                                    if opt_text_clean_raw.startswith(prefix_text): opt_text_clean_raw = opt_text_clean_raw[len(prefix_text):].lstrip(". ")
-                                opt_text_tex = escape_latex_special_chars(prefix_raw + opt_text_clean_raw).replace('\n\n', '\n\\par\n')
-                                tex_q_entry.append(f"  \\item {opt_text_tex}\n")
-                                for img_idx, img_url in enumerate(extract_image_urls_from_html(opt_title_html)):
-                                    img_ext = os.path.splitext(urlparse(img_url).path)[1] or '.png'
-                                    if not img_ext.startswith('.'): img_ext = '.' + img_ext
-                                    img_filename = f"option_{option_letter_for_img}_img_{img_idx+1}{img_ext}"
-                                    img_relative_path_for_tex = os.path.join(question_subfolder_relative, img_filename).replace("\\", "/")
-                                    if os.path.exists(os.path.join(question_folder_absolute, img_filename)):
-                                        tex_q_entry.append(f"  \\begin{{center}}\\includegraphics[width=0.7\\textwidth,height=0.2\\textheight,keepaspectratio]{{{img_relative_path_for_tex}}}\\end{{center}}\n")
-                            tex_q_entry.append("\\end{itemize}\n")
-                        tex_q_entry.append(f"\\textbf{{{escape_latex_special_chars('正确答案')}:}}\n{escape_latex_special_chars(' | '.join(correct_answer_str_list) or '未获取到')}\n")
-                        tex_q_entry.append("\\vspace{0.3em}\\hrulefill\\vspace{0.7em}\n")
-                        all_course_questions_tex_content.extend(tex_q_entry)
+                            if has_options and not is_fill_question:
+                                md_q_entry.append("**选项:**\n")
+                                for opt_idx, opt in enumerate(q_options_raw):
+                                    opt_title_html = opt.get("title", "")
+                                    opt_text_clean = get_clean_text_from_html(opt_title_html)
+                                    opt_soup = BeautifulSoup(opt_title_html, 'html.parser')
+                                    p_tag = opt_soup.find('p'); prefix = chr(ord('A') + opt_idx) + ". "; option_letter_for_img = chr(ord('A') + opt_idx)
+                                    if p_tag and len(p_tag.get_text(strip=True)) == 1 and p_tag.get_text(strip=True).isalpha():
+                                        prefix_text = p_tag.get_text(strip=True); prefix = prefix_text + ". "; option_letter_for_img = prefix_text
+                                        if opt_text_clean.startswith(prefix_text): opt_text_clean = opt_text_clean[len(prefix_text):].lstrip(". ")
+                                    md_q_entry.append(f"- {prefix}{opt_text_clean}\n")
+                                    for img_idx, img_url in enumerate(extract_image_urls_from_html(opt_title_html)):
+                                        img_ext = os.path.splitext(urlparse(img_url).path)[1] or '.png'
+                                        if not img_ext.startswith('.'): img_ext = '.' + img_ext
+                                        img_filename = f"option_{option_letter_for_img}_img_{img_idx+1}{img_ext}"
+                                        img_save_path = os.path.join(question_folder_absolute, img_filename)
+                                        if download_image(img_url, img_save_path, IMAGE_DOWNLOAD_HEADERS):
+                                            img_relative_path_for_md = os.path.join(question_subfolder_relative, img_filename).replace("\\", "/")
+                                            md_q_entry.append(f"  ![选项 {option_letter_for_img} 图片 {img_idx+1}]({img_relative_path_for_md})\n")
+                                md_q_entry.append("\n")
+                            md_q_entry.append(f"**正确答案:**\n{' | '.join(correct_answer_str_list) or '未获取到'}\n---\n")
+                            all_course_questions_md_content.extend(md_q_entry)
+
+                            # --- TeX Content ---
+                            tex_q_entry = [f"\\subsubsection*{{{question_counter_overall}. ({escape_latex_special_chars(q_type_name)}) \\small QID: {question_id}}}\n"]
+                            title_text_tex = escape_latex_special_chars(title_text_clean).replace('\n\n', '\n\\par\n')
+                            tex_q_entry.append(f"\\textbf{{{escape_latex_special_chars('题干')}:}}\n{title_text_tex}\n")
+                            for img_idx, img_url in enumerate(title_images):
+                                img_ext = os.path.splitext(urlparse(img_url).path)[1] or '.png'
+                                if not img_ext.startswith('.'): img_ext = '.' + img_ext
+                                img_filename = f"title_img_{img_idx+1}{img_ext}"
+                                img_relative_path_for_tex = os.path.join(question_subfolder_relative, img_filename).replace("\\", "/")
+                                if os.path.exists(os.path.join(question_folder_absolute, img_filename)):
+                                    tex_q_entry.append(f"\\begin{{center}}\\includegraphics[width=0.8\\textwidth,height=0.25\\textheight,keepaspectratio]{{{img_relative_path_for_tex}}}\\end{{center}}\n")
+                            tex_q_entry.append("\n")
+                            if has_options and not is_fill_question:
+                                tex_q_entry.append(f"\\textbf{{{escape_latex_special_chars('选项')}:}}\n\\begin{{itemize}}[leftmargin=*]\n")
+                                for opt_idx, opt in enumerate(q_options_raw):
+                                    opt_title_html = opt.get("title", ""); opt_text_clean_raw = get_clean_text_from_html(opt_title_html)
+                                    opt_soup = BeautifulSoup(opt_title_html, 'html.parser'); p_tag = opt_soup.find('p')
+                                    prefix_raw = chr(ord('A') + opt_idx) + ". "; option_letter_for_img = chr(ord('A') + opt_idx)
+                                    if p_tag and len(p_tag.get_text(strip=True)) == 1 and p_tag.get_text(strip=True).isalpha():
+                                        prefix_text = p_tag.get_text(strip=True); prefix_raw = prefix_text + ". "; option_letter_for_img = prefix_text
+                                        if opt_text_clean_raw.startswith(prefix_text): opt_text_clean_raw = opt_text_clean_raw[len(prefix_text):].lstrip(". ")
+                                    opt_text_tex = escape_latex_special_chars(prefix_raw + opt_text_clean_raw).replace('\n\n', '\n\\par\n')
+                                    tex_q_entry.append(f"  \\item {opt_text_tex}\n")
+                                    for img_idx, img_url in enumerate(extract_image_urls_from_html(opt_title_html)):
+                                        img_ext = os.path.splitext(urlparse(img_url).path)[1] or '.png'
+                                        if not img_ext.startswith('.'): img_ext = '.' + img_ext
+                                        img_filename = f"option_{option_letter_for_img}_img_{img_idx+1}{img_ext}"
+                                        img_relative_path_for_tex = os.path.join(question_subfolder_relative, img_filename).replace("\\", "/")
+                                        if os.path.exists(os.path.join(question_folder_absolute, img_filename)):
+                                            tex_q_entry.append(f"  \\begin{{center}}\\includegraphics[width=0.7\\textwidth,height=0.2\\textheight,keepaspectratio]{{{img_relative_path_for_tex}}}\\end{{center}}\n")
+                                tex_q_entry.append("\\end{itemize}\n")
+                            tex_q_entry.append(f"\\textbf{{{escape_latex_special_chars('正确答案')}:}}\n{escape_latex_special_chars(' | '.join(correct_answer_str_list) or '未获取到')}\n")
+                            tex_q_entry.append("\\vspace{0.3em}\\hrulefill\\vspace{0.7em}\n")
+                            all_course_questions_tex_content.extend(tex_q_entry)
 
                     if not questions_found_in_unit:
                         print(f"    No questions found in unit '{unit_title_raw}'.")
