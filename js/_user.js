@@ -401,11 +401,13 @@
 
   function promptExportFormat() {
     return new Promise((resolve) => {
-      const choice = prompt("选择导出格式:\n1 - Markdown (.md)\n2 - JSON (.json)\n\n请输入 1 或 2:", "1");
+      const choice = prompt("选择导出格式:\n1 - Markdown (.md)\n2 - JSON (.json)\n3 - 题库 JSON (.json)\n\n请输入 1 / 2 / 3:", "1");
       if (choice === null) {
         resolve(null);
       } else if (choice === "2") {
         resolve("json");
+      } else if (choice === "3") {
+        resolve("bank");
       } else {
         resolve("md");
       }
@@ -549,7 +551,9 @@
                     markdownParts.push("\n");
                   }
 
-                  markdownParts.push(`**正确答案:**\n${answerText || "未获取到"}\n---\n\n`);
+                  markdownParts.push(
+                    `**正确答案:**\n${answerText || "未获取到"}\n---\n\n`
+                  );
                   unitJson.questions.push(questionJson);
                   updateExportProgress(totalQuestions, 0);
                 }
@@ -589,6 +593,12 @@
         const jsonContent = JSON.stringify(jsonData, null, 2);
         logDebug("JSON generated", { contentLength: jsonContent.length });
         const filename = `${sanitizeFilename(courseName)}_课件题目.json`;
+        await downloadJson(filename, jsonContent);
+      } else if (format === "bank") {
+        const bankData = buildQuestionBank(jsonData);
+        const jsonContent = JSON.stringify(bankData, null, 2);
+        logDebug("Question bank JSON generated", { contentLength: jsonContent.length, count: bankData.length });
+        const filename = `佛脚刷题刷题.json`;
         await downloadJson(filename, jsonContent);
       } else {
         const markdownContent = markdownParts.join("");
@@ -923,6 +933,91 @@
       }
     }
     logDebug("Page did not change within timeout", previousPageId);
+  }
+
+  function buildQuestionBank(jsonData) {
+    const result = [];
+    if (!jsonData || !Array.isArray(jsonData.chapters)) {
+      return result;
+    }
+
+    const isChoiceType = function (t) {
+      return t === 1 || t === 2 || t === 3;
+    };
+    const isJudgeType = function (t) {
+      return t === 4;
+    };
+    const isBlankType = function (t) {
+      return t === 5 || t === 17;
+    };
+    const isQaType = function (t) {
+      return t === 6;
+    };
+
+    for (const chapter of jsonData.chapters) {
+      const units = Array.isArray(chapter.units) ? chapter.units : [];
+      for (const unit of units) {
+        const questions = Array.isArray(unit.questions) ? unit.questions : [];
+        for (const q of questions) {
+          const typeCode = q.question_type;
+          const title = q.title || "";
+          const rawAnswer = (q.answer || "").trim();
+
+          if (isChoiceType(typeCode)) {
+            const options = Array.isArray(q.options)
+              ? q.options.map((o) => o.text || "")
+              : [];
+            let ans = rawAnswer;
+            if (ans) {
+              ans = ans.replace(/\s*\|\s*/g, "");
+              ans = ans.replace(/[^A-Za-z]/g, "");
+              ans = ans.toUpperCase();
+            }
+            result.push({
+              题型: "选择题",
+              题干: title,
+              选项: options,
+              答案: ans || rawAnswer,
+              解析: ""
+            });
+          } else if (isJudgeType(typeCode)) {
+            let ans = rawAnswer;
+            if (/^(T|对|正确)/i.test(rawAnswer)) {
+              ans = "正确";
+            } else if (/^(F|错|错误)/i.test(rawAnswer)) {
+              ans = "错误";
+            }
+            result.push({
+              题型: "判断题",
+              题干: title,
+              答案: ans || rawAnswer,
+              解析: ""
+            });
+          } else if (isBlankType(typeCode)) {
+            const parts = rawAnswer
+              ? rawAnswer.split(/[\|；;，,]+/).map((s) => s.trim()).filter(Boolean)
+              : [];
+            const answersInBraces = parts.length
+              ? parts.map((a) => "{" + a + "}").join("")
+              : "";
+            result.push({
+              题型: "填空题",
+              题干: title + answersInBraces,
+              解析: ""
+            });
+          } else if (isQaType(typeCode)) {
+            result.push({
+              题型: "问答题",
+              题干: title,
+              答案: rawAnswer,
+              解析: ""
+            });
+          }
+        }
+      }
+    }
+
+    return result;
   }
 
   function buildAutoMarkdown(pageResults) {
