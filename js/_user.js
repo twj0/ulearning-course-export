@@ -598,7 +598,7 @@
         const bankData = buildQuestionBank(jsonData);
         const jsonContent = JSON.stringify(bankData, null, 2);
         logDebug("Question bank JSON generated", { contentLength: jsonContent.length, count: bankData.length });
-        const filename = `佛脚刷题刷题.json`;
+        const filename = `佛脚刷题题库.json`;
         await downloadJson(filename, jsonContent);
       } else {
         const markdownContent = markdownParts.join("");
