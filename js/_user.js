@@ -1321,13 +1321,9 @@
               : rawAnswer
                 ? rawAnswer.split(/[\|；;，,]+/).map((s) => s.trim()).filter(Boolean)
                 : [];
-            const answersInBraces = parts.length
-              ? parts.map((a) => "{" + a + "}").join("")
-              : "";
             result.push({
               题型: "填空题",
-              题干: title + answersInBraces,
-              答案: parts.join(" | ") || rawAnswer,
+              题干: title,
               解析: ""
             });
           } else if (isQaType(q)) {
