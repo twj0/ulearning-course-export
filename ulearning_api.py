@@ -19,8 +19,10 @@ AUTHORIZATION_TOKEN = os.getenv("AUTHORIZATION_TOKEN")
 UA_AUTHORIZATION_TOKEN = os.getenv("UA_AUTHORIZATION_TOKEN", "18016158863D724D29B3334BD9853C36")  # 从network.txt中获取的值
 
 # API基础URL - 更新为新系统的URL
-BASE_API_URL = os.getenv("BASE_API_URL", "https://ua.dgut.edu.cn")
+BASE_API_URL = os.getenv("BASE_API_URL", "https://ua.ulearning.cn")
 API_PREFIX = "/uaapi"  # 新API前缀
+API_ORIGIN = os.getenv("API_ORIGIN", BASE_API_URL)
+API_REFERER = os.getenv("API_REFERER", f"{BASE_API_URL}/")
 
 # 请求头配置
 API_HEADERS = {
@@ -28,8 +30,8 @@ API_HEADERS = {
     "accept-language": "zh",
     "authorization": AUTHORIZATION_TOKEN,
     "content-type": "application/json",
-    "origin": "https://ua.ulearning.cn", 
-    "referer": "https://ua.ulearning.cn/", 
+    "origin": API_ORIGIN, 
+    "referer": API_REFERER, 
     "sec-ch-ua": "\"Google Chrome\";v=\"137\", \"Chromium\";v=\"137\", \"Not/A)Brand\";v=\"24\"",
     "sec-ch-ua-mobile": "?0",
     "sec-ch-ua-platform": "\"Windows\"",

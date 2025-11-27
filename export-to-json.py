@@ -85,7 +85,8 @@ def download_image(url, save_path, headers): # 保留，但此功能不直接用
 def has_fill_inputs(html_content: str) -> bool:
     if not html_content:
         return False
-    return 'input-wrapper' in html_content or '<input' in html_content.lower()
+    lower_html = html_content.lower()
+    return 'input-wrapper' in lower_html or '<input' in lower_html
 
 def build_fill_stem(title_html: str, answers: list) -> str:
     if not title_html:
@@ -102,21 +103,58 @@ def build_fill_stem(title_html: str, answers: list) -> str:
         rendered = f"{rendered} {extra}".strip()
     return rendered
 
+def _answers_look_like_choice_letters(answers: list) -> bool:
+    if not answers:
+        return False
+    normalized = []
+    for a in answers:
+        text = re.sub(r"[^A-Za-z]", "", (a or "")).upper()
+        if not text:
+            continue
+        normalized.append(text)
+    if not normalized:
+        return False
+    for text in normalized:
+        if not text.isalpha():
+            return False
+        if len(text) > 2:
+            return False
+    return True
+
+def _answers_look_like_true_false(answers: list) -> bool:
+    if not answers:
+        return False
+    tf_keywords = {"t", "f", "true", "false", "对", "错", "正确", "错误"}
+    normalized = set()
+    for a in answers:
+        if not a:
+            continue
+        text = re.sub(r"\s+", "", str(a).strip()).lower()
+        if text:
+            normalized.add(text)
+    return bool(normalized) and normalized.issubset(tf_keywords)
+
 def infer_platform_question_type(q_data: dict, answer_data: dict) -> str:
     raw_type = q_data.get("type")
     inferred = get_question_type_name(raw_type, for_platform=True)
     has_options = bool(q_data.get("choiceitemModels"))
+    title_html = q_data.get("title", "") or ""
     answers = []
     if answer_data and answer_data.get("correctAnswerList"):
         answers = [get_clean_text_from_html(str(ans)) for ans in answer_data["correctAnswerList"]]
     elif answer_data and answer_data.get("answer"):
         answers = [get_clean_text_from_html(str(answer_data["answer"]))]
 
-    if inferred == "未知题型" and raw_type in (3, 5):
-        inferred = "填空题"
+    if raw_type == 5:
+        return "填空题"
+    if has_fill_inputs(title_html):
+        return "填空题"
+    if not has_options and answers:
+        if not _answers_look_like_choice_letters(answers) and not _answers_look_like_true_false(answers):
+            return "填空题"
 
-    if inferred == "选择题" and not has_options and (answers or has_fill_inputs(q_data.get("title", ""))):
-        inferred = "填空题"
+    if inferred == "未知题型" and raw_type in (3, 5):
+        return "填空题"
 
     return inferred
 
@@ -229,7 +267,18 @@ def process_courseware_questions():
                                 question_stem_clean = build_fill_stem(q_title_html, correct_answers_clean_list)
                             else:
                                 question_stem_clean = get_clean_text_from_html(q_title_html)
-                            
+
+                            # Attach extra metadata for a "full" JSON
+                            platform_entry["课程名称"] = course_name_raw
+                            platform_entry["章节名称"] = chapter_title_raw
+                            platform_entry["单元名称"] = unit_title_raw
+                            platform_entry["题目ID"] = question_id
+                            platform_entry["ParentID"] = parent_id
+                            platform_entry["原始题型码"] = q_type_code_api
+                            platform_entry["原始题干HTML"] = q_title_html
+                            platform_entry["原始选项HTML"] = [opt.get("title", "") for opt in q_options_raw_api] if q_options_raw_api else []
+                            platform_entry["原始答案数据"] = answer_data
+
                             # --- Populate platform_entry based on question type ---
                             if platform_entry["题型"] == "选择题":
                                 platform_entry["题干"] = question_stem_clean
@@ -271,19 +320,50 @@ def process_courseware_questions():
                             platform_data_list.append(platform_entry)
                             print(f"    Processed QID: {question_id} for platform import.")
 
-    # Generate the platform import file
-    # --- Generate Output Files ---
-    # 1. Simplified JSON for the platform
-    platform_json_filename = f"{course_name_sanitized}_questions_platform.json"
-    generate_json_output(platform_data_list, course_output_dir, platform_json_filename, is_complete_json=False)
-
-    # 2. Complete JSON with all raw data (optional, but good for debugging)
-    # We can create a more detailed list if needed, for now we use the same one.
+    # Generate the full export JSON (包含元数据的完整题目列表)
     complete_json_filename = f"{course_name_sanitized}_questions_complete.json"
     generate_json_output(platform_data_list, course_output_dir, complete_json_filename, is_complete_json=True)
 
+    # 同时生成刷题软件使用的精简版 JSON，命名为 *_questions_shuati.json
+    shuati_data_list = []
+    for entry in platform_data_list:
+        qtype = entry.get("题型")
+        if qtype == "选择题":
+            shuati_entry = {
+                "题型": "选择题",
+                "题干": entry.get("题干", ""),
+                "选项": entry.get("选项", []) or [],
+                "答案": entry.get("答案", "") or "",
+                "解析": entry.get("解析", "") or "",
+            }
+        elif qtype == "判断题":
+            shuati_entry = {
+                "题型": "判断题",
+                "题干": entry.get("题干", ""),
+                "答案": entry.get("答案", "") or "",
+                "解析": entry.get("解析", "") or "",
+            }
+        elif qtype == "填空题":
+            # 填空题的答案已经通过 build_fill_stem 嵌入到题干中的 {答案} 占位里
+            shuati_entry = {
+                "题型": "填空题",
+                "题干": entry.get("题干", ""),
+                "解析": entry.get("解析", "") or "",
+            }
+        elif qtype == "问答题":
+            shuati_entry = {
+                "题型": "问答题",
+                "题干": entry.get("题干", ""),
+                "答案": entry.get("答案", "") or "",
+                "解析": entry.get("解析", "") or "",
+            }
+        else:
+            # 其他类型（例如 未知题型）不导出到刷题 JSON
+            continue
+        shuati_data_list.append(shuati_entry)
 
-    # (The old generate_platform_import_file function is now replaced by generate_json_output)
+    shuati_json_filename = f"{course_name_sanitized}_questions_shuati.json"
+    generate_json_output(shuati_data_list, course_output_dir, shuati_json_filename, is_complete_json=False)
 
     print("\n--- 数据导出与JSON文件生成处理完成 ---")
     print(f"请检查输出目录: {os.path.abspath(course_output_dir)}")
