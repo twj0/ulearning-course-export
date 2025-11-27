@@ -121,6 +121,142 @@
 
 5.  **等待导出完成**:
 ...
+
+## Python 实现原理（以脚本为例）
+
+> 本节是给想二次开发或读代码的人看的，简单说明 Python 脚本是如何“伪装成浏览器”去拿到题目数据的。
+
+### 域名与环境变量
+
+- **域名**：
+  - 前端访问域名一般是 `https://ua.ulearning.cn` 或学校门户页面。
+  - 实际 Python 请求使用的 API 域名在 `.env` 中配置，默认例如：
+    ```python
+    from dotenv import load_dotenv
+    import os
+
+    load_dotenv()
+
+    BASE_API_URL = os.getenv("BASE_API_URL", "https://ua.dgut.edu.cn")
+    ```
+- **课程/班级等参数** 都来自 `.env`：
+    ```python
+    COURSE_ID = os.getenv("COURSE_ID")
+    CLASS_ID = os.getenv("CLASS_ID")
+    AUTHORIZATION_TOKEN = os.getenv("AUTHORIZATION_TOKEN")
+    UA_AUTHORIZATION_TOKEN = os.getenv("UA_AUTHORIZATION_TOKEN")
+    ```
+
+### Cookie / Token 与请求头
+
+脚本本身并不直接操作浏览器 Cookie，而是复用你在浏览器里已经登录好后抓到的 `authorization` / `ua-authorization` 值：
+
+```python
+import requests
+
+session = requests.Session()
+session.headers.update({
+    "authorization": AUTHORIZATION_TOKEN,
+    "ua-authorization": UA_AUTHORIZATION_TOKEN,
+    "User-Agent": "Mozilla/5.0 ...",
+    "Accept": "application/json, text/plain, */*",
+})
+```
+
+实际代码里，这些头部在 `ulearning_api.py` / `dgut_ulearning_api.py` 中集中配置，然后通过 `requests.Session` 复用。
+
+### 接口封装与网站特性
+
+- **老优学院接口**：走 `UlearningAPI`，典型路径类似：
+  - `/course/stu/{courseId}/directory`
+  - `/questionAnswer/{questionId}?parentId={parentId}`
+- **东莞理工新接口**：走 `DGUTUlearningAPI`，有版本前缀，例如：
+  - `/api/v2/learnCourse/courseDirectory`
+  - `/api/v2/learnQuestion/getQuestionAnswer`
+- **自动适配**：
+  - `api_adapter.APIAdapter` 会同时持有“旧 API 客户端”和“DGUT API 客户端”。
+  - 通过 `get_user_info()` 或课程目录等请求自动探测哪个可用；如果新接口返回错误，会自动回退到旧接口。
+
+一个简化版的“课程目录请求”示例（真实项目里是用类方法封装的）：
+
+```python
+def get_course_directory(course_id: str, class_id: str) -> dict:
+    url = f"{BASE_API_URL}/uaapi/course/{course_id}/directory"
+    resp = session.get(url, params={"classId": class_id}, timeout=15)
+    resp.raise_for_status()
+    return resp.json()
+```
+
+### 题目提取核心流程
+
+Python 端的题目导出主要发生在 `process_courseware_questions()` 中，大致流程：
+
+1. 调接口拿课程目录 `get_course_directory(COURSE_ID, CLASS_ID)`，得到所有章节的 `nodeid` / 标题。
+2. 对每个选中的章节，调用 `get_whole_chapter_page_content(node_id)` 拿到整个章节下的“页面 + 练习题”结构。
+3. 在返回 JSON 里，过滤出 `contentType == 7` 的单元（通常是“练习题/作业”区域）。
+4. 遍历 `coursepageDTOList` → `questionDTOList`，逐题读取题干、选项、题型。
+5. 对每道题再调用 `get_question_answer(question_id, parent_id)`，拿到正确答案及子题答案。
+6. 把题干 HTML 转成纯文本 / Markdown，必要时下载题目中的图片，最终写入汇总的 `.md` / `.tex` 文件。
+
+一个高度简化的遍历示例（去掉了异常处理和排版逻辑）：
+
+```python
+directory = get_course_directory(COURSE_ID, CLASS_ID)
+
+for chapter in directory.get("chapters", []):
+    node_id = chapter["nodeid"]
+    chapter_content = get_whole_chapter_page_content(node_id)
+
+    for item in chapter_content.get("wholepageItemDTOList", []):
+        for wholepage in item.get("wholepageDTOList", []):
+            if wholepage.get("contentType") != 7:
+                continue  # skip non-exercise blocks
+
+            parent_id = wholepage["id"]
+            for page in wholepage.get("coursepageDTOList", []):
+                for q in page.get("questionDTOList", []):
+                    question_id = q["questionid"]
+                    title_html = q.get("title", "")
+                    options = q.get("choiceitemModels") or []
+
+                    answer_data = get_question_answer(question_id, parent_id)
+                    # extract correct answers from answer_data...
+```
+
+### 填空题与题型判断
+
+优学院题库里，填空题有时并不会在目录 JSON 里显式标记类型，或者没有选项列表，因此代码做了额外的“启发式”判断：
+
+- **原始题型码**：`type` 字段（1 单选、2 多选、4 判断、5 填空等）。
+- **HTML 结构检查**：如果题干 HTML 中出现 `<input>` 或 `input-wrapper` 之类节点，也会当成“填空题”处理。
+- **无选项时默认填空**：如果 `choiceitemModels` 为空，但又能拿到答案列表，也会优先按填空题导出。
+
+对应的核心逻辑（简化版）：
+
+```python
+def is_fill_question(q_type: int, has_options: bool, title_html: str) -> bool:
+    if q_type == 5:
+        return True
+    if not has_options:
+        return True
+    lower_html = (title_html or "").lower()
+    return "input-wrapper" in lower_html or "<input" in lower_html
+```
+
+对于判断为填空的题目，脚本会用答案列表把题干里的空格替换成 `{answer}` 或 `{___}` 这样的占位符，方便在 Markdown / TeX 中直接看到“带答案的填空题”。
+
+### 输出与文件组织
+
+- 使用 `sanitize_filename()` 处理课程名/章节名等，避免路径中出现非法字符。
+- 使用 `BeautifulSoup` 的 `get_text()` 把题干和选项 HTML 转成纯文本，再写入 Markdown / TeX。
+- 用 `extract_image_urls_from_html()` 抓取 `<img>` 标签的 `src`，再通过 `requests.get()` 下载到对应题目文件夹。
+- 同时生成：
+  - 每门课一个 Markdown 汇总文件。
+  - 每门课一个 TeX 汇总文件（可自行用 LaTeX 编译成 PDF）。
+  - 按 `课程 -> 章节 -> 单元 -> 题目` 的层级存放图片与可选的 `question_info.txt`。
+
+以上是高层的 Python 实现原理，如果你想改造接口或适配新的学校，只需要在 `ulearning_api.py` / `dgut_ulearning_api.py` / `api_adapter.py` 里扩展域名和路径，再保持返回结构一致即可。
+
 ## 注意事项
 
 *   **Token 有效期**: `AUTHORIZATION_TOKEN` 通常具有时效性。如果脚本运行失败并提示认证错误（如HTTP 401），您可能需要重新从浏览器获取一个新的Token并更新到脚本中。
@@ -132,9 +268,4 @@
 ---
 
 powered by claudecode & claude sonnet 4.5
-*哈基米快出3 pro 吧，别给A÷画面了*
 
-
-## 贡献
-
-如果您有任何改进建议、发现Bug或希望贡献代码，欢迎通过提交 Pull Requests 或 Issues 来参与。
