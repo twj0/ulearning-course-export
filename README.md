@@ -1,6 +1,7 @@
 # 优学院题库导出工具
 
-这个工具用于从优学院课程中导出题目数据。当前 Python 入口已经标准化为根目录的 `main.py`，核心代码位于 `src/ulearning_course_export/`。
+这个工具用于从优学院**课件的章节测试**中导出题目数据。
+>当前 Python 入口已经标准化为根目录的 `main.py`，核心代码位于 `src/ulearning_course_export/`。
 
 ## 功能
 
@@ -9,7 +10,6 @@
 - 导出完整 JSON：包含课程、章节、单元、题目 ID、原始 HTML、原始答案数据等元信息
 - 导出题库 JSON：保留刷题导入常用字段，如题型、题干、选项、答案、解析
 
-旧的 Markdown/TeX 导出脚本和调试脚本已归档到 `_legacy/`。
 
 ## 安装依赖
 
@@ -27,6 +27,7 @@ uv sync
 
 复制 `.env.example` 为 `.env`，并填写课程与登录凭据：
 
+
 ```env
 COURSE_ID=你的课程ID
 CLASS_ID=你的班级ID
@@ -39,8 +40,7 @@ API_VERSION=auto
 
 `COURSE_ID` 和 `CLASS_ID` 是必填项。如果缺少这两个变量，运行时会直接报错并提示补充。
 
-`AUTHORIZATION_TOKEN` / `UA_AUTHORIZATION_TOKEN` 通常需要从浏览器开发者工具的 Network 请求头中复制；未配置时程序会提示，但实际接口大概率会鉴权失败。
-
+`AUTHORIZATION_TOKEN` / `UA_AUTHORIZATION_TOKEN` 通常需要从浏览器开发者工具的 Network 请求头中复制。
 ## 运行
 
 ```bash
