@@ -1,12 +1,22 @@
 [project]
 name = "ulearning-course-export"
 version = "0.1.0"
-description = "Add your description here"
+description = "Export Ulearning course questions to JSON"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.9"
 dependencies = [
     "requests",
-"beautifulsoup4",
-"python-dotenv",
-"json5"
+    "beautifulsoup4",
+    "python-dotenv",
+    "json5",
 ]
+
+[project.scripts]
+ulearning-course-export = "ulearning_course_export.cli:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

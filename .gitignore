@@ -1,4 +1,8 @@
 test.py
+_legacy/
+.env
+.env.*
+!.env.example
 # 用户cookie
 cookie.json
 # 导出文件
@@ -52,3 +56,8 @@ CLAUDE.md
 update_tokens.py
 diagnose_answer.py
 diagnose_question.py
+*/context_portal/*
+*/${workspaceFolder}/*
+context_portal/context.db
+context_portal/alembic.ini
+context_portal/alembic/versions/2025_06_17_initial_schema.py

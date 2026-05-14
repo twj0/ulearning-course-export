@@ -3,11 +3,9 @@ API适配器模块 - 处理新旧API之间的兼容性和转换
 该模块提供了一个适配器层，用于统一处理新旧API之间的差异，确保上层应用无需关心底层API的变化
 """
 
-import os
-import json
 from typing import Dict, List, Optional, Any, Union
-from dgut_ulearning_api import DGUTUlearningAPI
-from ulearning_api import UlearningAPI
+from .dgut_ulearning_api import DGUTUlearningAPI
+from .ulearning_api import UlearningAPI
 
 
 class APIAdapter:
@@ -277,47 +275,53 @@ class APIAdapter:
             raise ValueError(f"不支持的API版本: {api_version}")
 
 
-# 创建全局API适配器实例
-api_adapter = APIAdapter()
+_api_adapter: Optional[APIAdapter] = None
+
+
+def get_api_adapter() -> APIAdapter:
+    global _api_adapter
+    if _api_adapter is None:
+        _api_adapter = APIAdapter()
+    return _api_adapter
 
 # 向后兼容的函数接口
 def get_course_directory(course_id: str, class_id: str, headers: Dict = None) -> Optional[Dict]:
     """向后兼容的课程目录获取函数"""
-    response = api_adapter.get_course_directory(course_id, class_id)
+    response = get_api_adapter().get_course_directory(course_id, class_id)
     return response.get("data") if response and response.get("success") else response
 
 def get_whole_chapter_page_content(node_id: str, headers: Dict = None) -> Optional[Dict]:
     """向后兼容的章节内容获取函数"""
-    response = api_adapter.get_whole_chapter_page_content(node_id)
+    response = get_api_adapter().get_whole_chapter_page_content(node_id)
     return response.get("data") if response and response.get("success") else response
 
 def get_question_answer(question_id: str, parent_id: str, headers: Dict = None) -> Optional[Dict]:
     """向后兼容的题目答案获取函数"""
-    response = api_adapter.get_question_answer(question_id, parent_id)
+    response = get_api_adapter().get_question_answer(question_id, parent_id)
     return response.get("data") if response and response.get("success") else response
 
 def get_user_info(headers: Dict = None) -> Optional[Dict]:
     """向后兼容的用户信息获取函数"""
-    response = api_adapter.get_user_info()
+    response = get_api_adapter().get_user_info()
     return response.get("data") if response and response.get("success") else response
 
 def get_course_remaining(course_id: str, class_id: str, headers: Dict = None) -> Optional[Dict]:
     """向后兼容的课程剩余时间获取函数"""
-    response = api_adapter.get_course_remaining(course_id, class_id)
+    response = get_api_adapter().get_course_remaining(course_id, class_id)
     return response.get("data") if response and response.get("success") else response
 
 def get_study_record(course_id: str, class_id: str, headers: Dict = None) -> Optional[Dict]:
     """向后兼容的学习记录获取函数"""
-    response = api_adapter.get_study_record(course_id, class_id)
+    response = get_api_adapter().get_study_record(course_id, class_id)
     return response.get("data") if response and response.get("success") else response
 
 def send_study_heartbeat(course_id: str, class_id: str, node_id: str, 
                        current_time: int = None, headers: Dict = None) -> Optional[Dict]:
     """向后兼容的学习心跳发送函数"""
-    response = api_adapter.send_study_heartbeat(course_id, class_id, node_id, current_time)
+    response = get_api_adapter().send_study_heartbeat(course_id, class_id, node_id, current_time)
     return response.get("data") if response and response.get("success") else response
 
 def sync_personal_data(headers: Dict = None) -> Optional[Dict]:
     """向后兼容的个人数据同步函数"""
-    response = api_adapter.sync_personal_data()
+    response = get_api_adapter().sync_personal_data()
     return response.get("data") if response and response.get("success") else response
