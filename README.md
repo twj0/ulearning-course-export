@@ -28,6 +28,10 @@ uv sync
 复制 `.env.example` 为 `.env`，并填写课程与登录凭据：
 
 
+- 先在地址栏找到COURSE_ID和CLASS_ID;
+- 再点`F12`打开开发者模式，目的是寻找authorization的token，寻找路径 `储存(storage)`->`Cookies`->`AUTHORIZATION`，双击进行ctrl+c
+>参考下面的图片
+![](./env.png)
 ```env
 COURSE_ID=你的课程ID
 CLASS_ID=你的班级ID
